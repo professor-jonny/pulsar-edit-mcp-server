@@ -1,7 +1,12 @@
 # Pulsar Edit MCP Server & LLM Coding Assistant
 
 this is a fork of: https://github.com/drunnells/pulsar-edit-mcp-server
-I'm trying to refactor this idea using my personal knowledges and a consistent part of AI analisys on code
+I'm trying to refactor this idea using my personal knowledges and a consistent part of AI analysis on code
+now includes Ghidra style function source code search and replace tools
+added a grep MCP commands so we can grep in windows.
+added run command so we can run shell commands from such as build and automating installing packages.
+
+effectively it is an opensource Claude code addon to pulsar with added enhancements.
 
 
 | :warning: WARNING          |
