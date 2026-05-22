@@ -1,17 +1,21 @@
 {
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
-  "version": "0.0.16",
+  "version": "0.0.15",
   "type": "module",
-  "description": "This is a Pulsar Editor MCP",
-  "keywords": [],
+  "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
+  "keywords": ["mcp", "llm", "ai", "pulsar", "editor"],
+  "activationHooks": [
+    "core:loaded-shell-environment"
+  ],
   "activationCommands": {
-    "atom-workspace": "pulsar-edit-mcp-server:listen"
+    "atom-workspace": [
+      "pulsar-edit-mcp-server:listen",
+      "pulsar-edit-mcp-server:restart",
+      "pulsar-edit-mcp-server:disable-group"
+    ]
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/coppolaf/pulsar-edit-mcp-server"
-  },
+  "repository": "https://github.com/professor-jonny/pulsar-edit-mcp-server",
   "license": "MIT",
   "engines": {
     "atom": ">=1.0.0 <2.0.0"
@@ -20,6 +24,16 @@
     "status-bar": {
       "versions": {
         "^1.0.0": "consumeStatusBar"
+      }
+    },
+    "linter-indie": {
+      "versions": {
+        "2.0.0": "consumeLinter"
+      }
+    },
+    "linter": {
+      "versions": {
+        "2.0.0": "consumeLinterMessages"
       }
     }
   },
@@ -35,15 +49,14 @@
     "patch-package": "^8.0.0"
   },
   "scripts": {
-    "postinstall": "patch-package",
-    "test:unit": "node --test test/**/*.test.js"
+    "postinstall": "patch-package"
   },
   "configSchema": {
     "mcpServerPort": {
       "type": "integer",
-      "default": 6277,
+      "default": 3000,
       "title": "MCP Server Port",
-      "description": "Listen on this port for MCP requests from your LLM client (default chosen to avoid conflicts with common local dev servers)",
+      "description": "Listen on this port for MCP requests from your LLM client",
       "order": 1
     },
     "apiEndpointPrefix": {
@@ -60,47 +73,74 @@
       "description": "The API key for authenticating requests when using the built-in chat",
       "order": 3
     },
-    "providerTimeoutMs": {
-      "type": "integer",
-      "default": 30000,
-      "title": "Provider Timeout (ms)",
-      "description": "Timeout for built-in chat requests to the OpenAI-compatible provider before surfacing a retryable timeout error.",
+    "autoStart": {
+      "type": "boolean",
+      "default": false,
+      "title": "Auto-Start MCP Server on Pulsar Launch",
+      "description": "Automatically start the MCP server when Pulsar opens. If the server fails to start on boot, use Packages > MCP Server > Restart Server from the menu instead.",
       "order": 4
     },
-    "chatMaxRetries": {
-      "type": "integer",
-      "default": 2,
-      "title": "Chat Max Retries",
-      "description": "Maximum number of automatic retries for retryable built-in chat failures such as 429, timeout or transient 5xx/network errors.",
+    "showChatPanel": {
+      "type": "boolean",
+      "default": true,
+      "title": "Show Chat Panel on Startup",
+      "description": "Open the built-in chat panel when Pulsar launches. Disable to save screen space if you use an external client.",
       "order": 5
     },
-    "chatRetryBaseDelayMs": {
-      "type": "integer",
-      "default": 750,
-      "title": "Chat Retry Base Delay (ms)",
-      "description": "Base delay used for exponential backoff in the built-in chat after retryable provider errors.",
-      "order": 6
-    },
-    "chatRequestMinGapMs": {
-      "type": "integer",
-      "default": 600,
-      "title": "Chat Request Minimum Gap (ms)",
-      "description": "Minimum enforced gap between consecutive built-in chat completion requests to reduce provider saturation during proposal/apply sequences.",
-      "order": 7
-    },
-    "chatContextMessageLimit": {
-      "type": "integer",
-      "default": 12,
-      "title": "Chat Context User-Turn Limit",
-      "description": "Maximum number of recent user turns retained when building built-in chat provider payloads.",
-      "order": 8
-    },
-    "chatToolContentCharLimit": {
-      "type": "integer",
-      "default": 2000,
-      "title": "Chat Tool Content Limit",
-      "description": "Maximum characters retained from each tool result message before truncation in provider payloads.",
-      "order": 9
+    "toolGroups": {
+      "type": "object",
+      "title": "Tool Groups (disable unused groups to save tokens)",
+      "order": 6,
+      "properties": {
+        "edit": {
+          "type": "boolean",
+          "default": true,
+          "title": "Edit Tools",
+          "description": "replace-text, replace-all, replace-document, replace-function-body, insert-text-at-line, insert-at-line, delete-line-range, get-selection"
+        },
+        "search": {
+          "type": "boolean",
+          "default": true,
+          "title": "Search Tools",
+          "description": "find-text, grep-file, grep-project, search-symbol, get-context-around"
+        },
+        "navigation": {
+          "type": "boolean",
+          "default": true,
+          "title": "Navigation Tools",
+          "description": "goto-line, open-file, list-open-files, get-surrounding-context, get-line-count, get-filename, get-full-path"
+        },
+        "fileOps": {
+          "type": "boolean",
+          "default": true,
+          "title": "File Operation Tools",
+          "description": "read-file, read-lines, create-file, file-line-count, get-project-files, list-project-functions, get-includes-and-defines, replace-across-files"
+        },
+        "diagnostics": {
+          "type": "boolean",
+          "default": true,
+          "title": "Diagnostics Tools",
+          "description": "get-diagnostics"
+        },
+        "safety": {
+          "type": "boolean",
+          "default": true,
+          "title": "Safety Tools",
+          "description": "checkpoint, restore-checkpoint, list-checkpoints, diff-preview, undo, redo"
+        },
+        "ghidra": {
+          "type": "boolean",
+          "default": true,
+          "title": "Ghidra Tools",
+          "description": "list-functions, search-functions, get-function-body, get-xrefs, add-comment, get-function-list-with-comments"
+        },
+        "highlight": {
+          "type": "boolean",
+          "default": true,
+          "title": "Highlight Tools",
+          "description": "highlight-range"
+        }
+      }
     }
   }
 }

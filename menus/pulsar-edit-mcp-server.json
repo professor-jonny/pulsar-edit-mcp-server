@@ -2,8 +2,12 @@
   "context-menu": {
     "atom-text-editor": [
       {
-        "label": "MCP Listen",
+        "label": "MCP: Toggle Server",
         "command": "pulsar-edit-mcp-server:listen"
+      },
+      {
+        "label": "MCP: Restart Server",
+        "command": "pulsar-edit-mcp-server:restart"
       }
     ]
   },
@@ -12,11 +16,19 @@
       "label": "Packages",
       "submenu": [
         {
-          "label": "MCP Srv and LLM Chat",
+          "label": "MCP Server",
           "submenu": [
             {
               "label": "Toggle Server On/Off",
               "command": "pulsar-edit-mcp-server:listen"
+            },
+            {
+              "label": "Restart Server",
+              "command": "pulsar-edit-mcp-server:restart"
+            },
+            {
+              "label": "Disable Tool Group...",
+              "command": "pulsar-edit-mcp-server:disable-group"
             }
           ]
         }
