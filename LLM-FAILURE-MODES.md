@@ -535,3 +535,224 @@ the improvement proposals by actual observed failure frequency rather than intui
 | Does apply_patch fail more than str_replace? | Quantifies whether keeping apply-patch is worth the maintenance |
 | How often do fuzzyWhitespaceCommits fire? | Tells you how many retries P3 is saving once implemented |
 
+---
+
+## Using `session-notes` and `get-edit-stats` — Recommended Workflow
+
+Both tools are implemented and live in pulsar-edit-mcp-server. This section
+documents the intended usage pattern so it can be included in project
+instructions given to the LLM at session start.
+
+### What is available
+
+**`session-notes`** — persistent JSON file on disk, survives server restarts.
+The LLM writes notes (what failed, what worked, what to do differently) and
+reads them back at the start of the next session. Notes are tagged with a
+`project` label so they can be filtered per codebase.
+
+**`get-edit-stats`** — in-memory per-session counters for every edit tool:
+hits, fail reasons, hint usage, dry-run count, fuzzy-whitespace commits,
+average `old_str` line count. Queryable by the LLM mid-session to spot
+failure clusters and adjust strategy. Resets on server restart; can be reset
+manually with `reset:true`.
+
+### Example project instructions (include in system prompt or CLAUDE.md)
+
+```
+## Session start — always do this first
+1. Call session-notes({ action: "read", project: "<project-name>" })
+   Read all prior notes for this project. Adjust your edit strategy based on
+   what failed before — indentation style, files that hot-reload on save,
+   tools that worked better than others.
+
+2. Call get-edit-stats() to confirm counters are at zero (fresh session).
+   If not, a prior session was interrupted — the non-zero counts are from
+   that session and can be ignored or reset with { reset: true }.
+
+## During the session
+- If str_replace fails more than twice in a row, call get-edit-stats() to
+  classify the failure mode (whitespace? partialMatch? outOfScope?) and
+  adjust accordingly — switch to fuzzyWhitespace:true, widen old_str, or
+  change to replace-function-body.
+- Use afterHint or functionHint on every str_replace where the pattern could
+  appear more than once in the file.
+
+## Session end — always do this before closing
+1. Call get-edit-stats() to read the session summary.
+2. Call session-notes({ action: "write", project: "<project-name>", note: "..." })
+   Record:
+   - Which tools and hints worked reliably on this codebase
+   - Any failure patterns encountered (e.g. "tabs not spaces", "file
+     hot-reloads on save — don't save mid-edit sequence")
+   - The session stats summary line (hits/fails/%) for later comparison
+   - Anything that would have saved a retry if you'd known it at session start
+```
+
+### Why this closes the cross-session learning gap
+
+Claude Code has telemetry, but it is aggregate, deferred, and goes to Anthropic
+for model training — the running agent never sees it mid-session, it is not
+broken down per tool or per failure reason, and it has no awareness of the
+specific codebase being edited. Cline and Cursor have no in-session
+instrumentation at all. In all three cases the agent starts every session with
+zero codebase-specific memory of what caused retries last time.
+
+The session-notes + get-edit-stats combination is different in three specific
+ways: failure data is classified per tool and per failure reason (not just an
+aggregate pass/fail count), it is written by the agent at the point of failure
+in its own words, and it is read back by the same agent at the start of the
+next session on the same project. The loop is local, immediate, and
+codebase-specific rather than aggregate and deferred.
+
+---
+
+## Additional Failure Modes & Proposals (May 2026 Audit)
+
+The following were identified by reviewing the live pulsar-edit-mcp-server
+implementation against the failure modes above. Each represents a gap that
+exists across all current LLM editing tools (Claude Code, Cline, Cursor) and
+that a well-instrumented MCP server is positioned to solve.
+
+---
+
+### G1 — Insert failure reasons are unclassified
+
+**What all tools do:** When an insert fails, tools report a generic failure.
+Neither Claude Code nor Cline distinguishes between "the line number was out of
+range" (stale after a prior edit) and "the anchor string doesn't exist in the
+file" (wrong content). Both are reported as the same failure, or not reported
+at all.
+
+**Why it matters:** The remedies are completely different. A stale line number
+means the LLM needs to re-read the file. An anchor string not found means the
+LLM constructed the wrong anchor. Conflating them forces a full read-and-retry
+regardless of cause, adding a wasted tool call every time.
+
+**What a smart server can do:** Classify at the point of failure and return a
+targeted error — "anchor `afterContent` not found" vs "line number out of
+range (file has N lines, you passed M)". The failure response tells the LLM
+exactly what kind of retry is needed, with the minimum context to fix it
+immediately.
+
+**Stats angle:** Separate counters for `anchorNotFound` vs `outOfRange` in
+insert stats let you measure which failure mode actually dominates in practice
+— and therefore which mitigation is worth building first.
+
+---
+
+### G2 — Edit failure diagnostics don't cover the size of what failed
+
+**What all tools do:** When a str_replace or equivalent fails, tools report
+that the match wasn't found. None of them record or report how long the
+`old_str` was. The LLM has no feedback on whether it is consistently failing
+on short strings (likely a typo or whitespace issue) or long blocks (likely
+memory reconstruction divergence).
+
+**Why it matters:** Failure mode 3 (multiline reconstruction from memory)
+gets worse as `old_str` length increases — the LLM is more likely to paraphrase
+a comment or drop a blank line in a 20-line block than in a 3-line one. But
+without size data split by outcome, this is intuition not measurement.
+
+**What a smart server can do:** Track average `old_str` line count separately
+for hits and fails. If `avgOldStrLinesFails` is consistently much higher than
+`avgOldStrLinesHits`, the data confirms that long blocks are the problem and
+that the right mitigation is smaller, more targeted edits — not better
+whitespace handling.
+
+**Stats angle:** Two accumulators — one incremented on success, one on failure
+— answer the question "do longer old_str blocks fail more?" with real session
+data rather than intuition.
+
+---
+
+### G3 — No tool tracks whether compound hints reduce failures
+
+**What all tools do:** None of the existing tools (Claude Code, Cline, Cursor)
+have any hint system at all. Even in servers that do implement hints
+(`functionHint`, `occurrence`), the hints are tracked individually — so you
+can see that `functionHint` was used N times, but not whether using
+`functionHint` together with `occurrence:N` (the most precise targeting mode)
+performs better than either alone.
+
+**Why it matters:** If the compound combination eliminates the
+`wrongOccurrence` fail class, that's strong evidence that teaching the LLM
+to always use both when targeting a repeated pattern is worth the prompt cost.
+If it doesn't, the complexity is wasted.
+
+**What a smart server can do:** Track the hint combination as a unit — one
+counter for `functionHint alone`, one for `occurrence alone`, one for both
+together. Three numbers answer whether precision stacks additively.
+
+---
+
+### G4 — Session memory doesn't persist or filter across projects
+
+**What all tools do:** Claude Code has telemetry but it is aggregate and feeds
+back into model training — the running agent has no access to it during a
+session and it carries no codebase-specific context. Cline and Cursor have no
+session memory mechanism at all. In all cases the agent starts every session
+from scratch with no knowledge of what caused retries on this specific project
+last time.
+
+**Why it matters:** Repeated failures on the same file or pattern across
+sessions are invisible. The agent re-fails from scratch every time. A session
+that ended with "whitespace on this file is tabs not spaces" is completely lost
+by the next session.
+
+**What a smart server can do:** Persist notes written by the agent across server
+restarts, keyed by project. At session start the agent reads its own prior
+notes and adjusts strategy before making the first edit. Filtering by project
+on read means notes from unrelated codebases don't add noise. The data is
+per-tool and per-failure-reason, not aggregate — so the agent knows exactly
+which tool failed and why, not just that something went wrong.
+
+---
+
+### G5 — No way to read a function body by name before replacing it
+
+**What all tools do:** To replace a function body without corrupting its
+signature, the LLM must first read the current signature. In all existing
+tools this requires either loading the full file (expensive on large files) or
+using a grep/search tool and then reading the surrounding lines (two tool
+calls, and the LLM still has to identify the function boundaries manually).
+
+**Why it matters:** `replace-function-body` (or equivalent whole-function
+rewrite tools) carry a silent risk: if the LLM reconstructs the signature from
+memory rather than reading it, it can silently change the function's interface.
+The tool has no way to detect this without a prior read.
+
+**What a smart server can do:** Expose a `get-function-body` tool that accepts
+a function name and returns the exact current lines — signature through closing
+brace — using the same brace-matching logic already used for replacement. The
+LLM reads the exact signature in one targeted call, then writes back a
+replacement that is guaranteed to include it. Eliminates the silent-signature-
+change failure class at the cost of one cheap tool call.
+
+**Effort:** Very low in a server that already has brace-matching infrastructure
+— it is the read half of `replace-function-body` exposed as its own tool.
+
+---
+
+### G6 — Edit failure rates are never measured across sessions
+
+**What all tools do:** No existing tool measures its own edit success rate in a
+form the LLM can query. Claude Code has opt-in telemetry sent to Anthropic;
+a third-party scraper can compute an aggregate success rate from transcripts
+after the fact. Cline and Cursor have nothing. None of them give the LLM
+access to its own performance data during a session, and none persist it across
+sessions.
+
+**Why it matters:** Without cross-session data, proposal priority is guesswork.
+The priority table in this document (P1 > P2 > P3 > …) is based on reasoning
+about which failure modes are most common — but real usage data might show that
+`partialMatch` is far rarer than `whitespace`, or that `apply_patch` fails at
+five times the rate of `str_replace`. That would immediately reprioritise
+which mitigations to build.
+
+**What a smart server can do:** When the LLM resets the session stats counter,
+append the completed session's report (with a timestamp) to a JSON file on
+disk before zeroing. Over weeks of normal use this builds a dataset that ranks
+failure modes by observed frequency, validates whether implemented mitigations
+actually reduced their target fail class, and surfaces regressions when a code
+change makes things worse. No external tooling required — the data collection
+is inside the server and the LLM can query the history directly.

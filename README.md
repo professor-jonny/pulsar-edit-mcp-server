@@ -121,7 +121,7 @@ Always loaded. Cannot be disabled.
 | `read-lines` | Read a specific line range from any file (cheaper than read-file for large files). Buffer-first when the file is open in Pulsar |
 | `create-file` | Create a new file and open it in the editor |
 | `move-file` | Move or rename a file. Open tab is retargeted in-place via `buffer.setPath()` — undo history preserved |
-| `copy-file` | Copy a file to a new path and open the copy in a new tab |
+| `copy-file` | Copy a file to a new path and open the copy in a new tab. If the source is open with unsaved edits, the copy reflects the live buffer content |
 | `rename-file` | Rename a file within its current directory. Tab retargeted in-place — undo history preserved |
 | `create-folder` | Create a directory (and any missing parents) at a given path |
 | `rename-folder` | Rename or move a folder. All open tabs inside are retargeted to their new paths automatically — undo history preserved per tab |
@@ -148,10 +148,10 @@ Always loaded. Cannot be disabled.
 | Tool | Description |
 |---|---|
 | `grep-file` | Search a file for a pattern and return matching lines. Buffer-first when the file is open in Pulsar |
-| `grep-project` | Search all project files for a pattern |
-| `search-symbol` | Find all uses of a C symbol with whole-word matching |
+| `grep-project` | Search all project files for a pattern. Buffer-first for open files — unsaved edits are always reflected |
+| `search-symbol` | Find all uses of a C symbol with whole-word matching. Buffer-first for open files |
 
-> Grep tools use a cross-platform implementation so they work consistently on Windows and Unix. `grep-file` reads from the live buffer when the file is open in Pulsar; `grep-project` always reads from disk.
+> Grep tools use a cross-platform implementation so they work consistently on Windows and Unix. All three tools (`grep-file`, `grep-project`, `search-symbol`) read from the live buffer when a file is open in Pulsar, so unsaved edits are always visible without saving first.
 
 ### Safety
 
@@ -228,6 +228,14 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
 - After 3 consecutive failures on the same tool, the response suggests switching to a more appropriate alternative (e.g. `replace-function-body` or `replace-document`)
 
+### partial match feedback
+When a tool fails partway through, it returns structured context so the LLM can correct and retry in one step rather than making a separate read call:
+- **`str_replace` — wrong `occurrence:N`**: reports the actual line number of every match that *was* found so the correct N can be chosen immediately
+- **`replace-function-body` — name not found**: each close-match suggestion now includes the function's actual current signature from the buffer, not just its name
+- **`delete-block` — `endContent` not found**: shows the 10 lines following the matched `startContent` anchor so the correct end string can be picked without a `read-lines` call
+- **`replace-block` — brace match failure**: shows lines around the anchor (no `{` case) or from the opening brace (unmatched `{` case) so the structure can be verified without a round trip
+- **`replace-across-files` — skipped files**: files that error on read or write are now returned in a `skipped` array with the reason rather than being silently dropped
+
 ### content-anchored editing (`str_replace`, `insert`, `delete-block`, `get-region`)
 - `functionHint` scopes `str_replace` to within a named function body — immune to line-number drift, preferred for JS/C edits
 - `afterHint` starts the search after the first occurrence of a content string — content-stable equivalent of `lineHint`
@@ -252,17 +260,52 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 ### dry run
 - used to show hits on patches and return diff like responses to give the user the option to view the expected output, and fix matches
 
-### session notes
-- At the **start** of a session on a known project, call `session-notes` with `action:read` — the LLM recovers context about what failed last time and what fixes worked
-- At the **end** of a session, call `session-notes` with `action:write` — record failure patterns, successful strategies, and anything worth knowing next time
-- Notes are stored in `session-notes.json` in the package root, survive server restarts, and accumulate across sessions
-- The `project` field groups notes by project so notes from different codebases stay organised
-- This is the mechanism that turns per-session failure reasoning into persistent cross-session memory
+### session notes and edit stats
+
+These two tools give you persistent memory across sessions on this codebase. **Follow this protocol automatically — do not wait to be asked.**
+
+#### When you start a session
+
+Before doing anything else, call:
+
+```
+session-notes({ action: "read", project: "<project-name>" })
+```
+
+Read what you wrote last time. Adjust your approach immediately — indentation style, files that hot-reload on save, which hints worked, what caused retries. Then call:
+
+```
+get-edit-stats()
+```
+
+Check the counters are at zero. If they are not, a previous session was interrupted — reset with `{ reset: true }` and carry on.
+
+#### While you are working
+
+- If `str_replace` fails twice in a row, call `get-edit-stats()` before trying again. The failure class (`whitespace`, `partialMatch`, `outOfScope`) tells you what to fix — do not retry blindly with the same call.
+- Use `afterHint` or `functionHint` on any `str_replace` where the pattern could appear more than once in the file.
+- If whitespace failures are showing up in stats, switch to `fuzzyWhitespace: true` for the rest of the session on that file.
+
+#### When the session ends
+
+Call `get-edit-stats()` to read the summary, then write a note before you close:
+
+```
+session-notes({ action: "write", project: "<project-name>", note: "..." })
+```
+
+Record:
+- Which tools and hints worked well on this codebase
+- Any failure patterns you hit (e.g. `"tabs not spaces — use fuzzyWhitespace"`, `"mcp-registration.js hot-reloads on save — verify buffer before saving"`)
+- The stats summary line (e.g. `"34 ops: 31 hits 91%, 3 whitespace fails"`)
+- Anything that would have saved a retry if you had known it at the start
+
+Notes survive server restarts and build up over time in `session-notes.json` in the package root. You can filter by project on read so notes from other codebases do not get in the way.
 
 ### edit stats panel
-- **Packages → MCP Server → Show Edit Stats...** opens a live session stats panel showing hits, fail reasons, hint usage, and fuzzy-whitespace commit counts for every edit tool
-- A **Reset Counters** button in the panel zeroes all stats for the current session — useful when starting a new editing task
-- The LLM can also query and reset stats directly via the `get-edit-stats` tool mid-session
+
+- **Packages → MCP Server → Show Edit Stats...** opens a live stats panel showing hits, fail reasons, hint usage, and fuzzy-whitespace commits for every edit tool
+- **Reset Counters** in the panel zeroes all stats — same counters as `get-edit-stats`, just visible to the developer too
 
 ### Emergency Revert
 

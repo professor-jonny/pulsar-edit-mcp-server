@@ -1,5 +1,39 @@
 
 
+## 0.5.0
+
+### Bug fixes — buffer integrity
+
+- **`replace-across-files` read pass** — was reading from disk (`fs.readFile`) even when a file was open with unsaved edits, then pushing the disk-based result into the live buffer via `setTextViaDiff`. Unsaved work in any open file matching the query was silently overwritten. Fixed by using `readFileOrBuffer` so the replacement is computed against the live buffer content.
+- **`replace-across-files` path comparison** — used bare `===` to find the open editor for a file path, instead of `path.resolve()` like every other tool. On Windows this caused a silent miss (path casing or separator difference), causing the tool to fall through to `fs.writeFile` and bypass the buffer entirely — losing undo history. Fixed to use `path.resolve()` consistently.
+- **`copy-file`** — used `fs.copyFile` which reads from disk, ignoring any unsaved edits in an open buffer. If the source file had unsaved changes the copy would be missing them silently. Fixed to detect an open editor for the source path and write from its buffer instead.
+- **`grep-project`** — read from disk only, returning stale results for any file with unsaved edits. LLM would then make edits based on line numbers that didn't match the live buffer. Fixed to use `readFileOrBuffer`.
+- **`search-symbol`** — same disk-only read issue as `grep-project`. Fixed to use `readFileOrBuffer`.
+- **`retargetEditor` fallback** (when `buffer.setPath` is unavailable) — after destroy+reopen+setText, the undo stack contained operations against the old file path. Calling undo could silently replay them against the wrong buffer. Fixed by calling `clearUndoStack()` after setText so the history is clean rather than corrupt.
+- **`create-file`** — if `workspace.open` failed after the file was already written to disk, the file was left as an orphan. Subsequent `create-file` calls would throw "file already exists" with no way to retry. Fixed by catching the open failure and unlinking the orphaned file before re-throwing.
+
+### Improved failure diagnostics — partial match feedback
+
+All four tools now return structured context on failure so the LLM can correct and retry in one step rather than making a separate read call:
+
+**`str_replace` — `occurrence:N` wrong**
+- Previously returned only "N matches found, you asked for M". Now also scans back and reports the actual line number of every match that *was* found, so the correct `occurrence:N` or a narrower `old_str` can be chosen immediately.
+
+**`replace-function-body` — function name not found**
+- Previously listed similar function names as bare strings. Now includes each close match's actual current signature from the buffer, so a renamed function can be corrected without a `get-function-body` round trip.
+
+**`delete-block` — `endContent` not found**
+- Previously returned only "endContent not found after line N". Now shows the 10 lines that follow the matched `startContent` anchor, so the correct `endContent` string can be picked without a separate `read-lines` call.
+
+**`replace-block` — brace match failures**
+- No opening `{` found: now shows the lines at and immediately after the anchor so the caller can verify whether it's a brace-delimited block at all.
+- Unmatched `{`: now shows the content from the opening brace line so a missing `}` or unexpected nesting can be spotted without a `read-lines` call.
+
+**`replace-across-files` — silent skips**
+- Files that previously errored on read or write were silently dropped with `continue`. Now accumulated into a `skipped` array with the error reason and returned alongside `files` in the response. Write failures are also caught and reported rather than throwing uncaught. `skippedCount` is always present in the return value.
+
+---
+
 ## 0.4.0
 
 ### New tools (P1–P8 from llm-edit-failure-modes.md)
