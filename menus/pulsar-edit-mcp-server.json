@@ -8,6 +8,14 @@
       {
         "label": "MCP: Restart Server",
         "command": "pulsar-edit-mcp-server:restart"
+      },
+      {
+        "label": "MCP: Emergency Revert Server File...",
+        "command": "pulsar-edit-mcp-server:emergency-revert"
+      },
+      {
+        "label": "MCP: Show Edit Stats...",
+        "command": "pulsar-edit-mcp-server:show-edit-stats"
       }
     ]
   },
@@ -29,6 +37,14 @@
             {
               "label": "Disable Tool Group...",
               "command": "pulsar-edit-mcp-server:disable-group"
+            },
+            {
+              "label": "Emergency Revert Server File...",
+              "command": "pulsar-edit-mcp-server:emergency-revert"
+            },
+            {
+              "label": "Show Edit Stats...",
+              "command": "pulsar-edit-mcp-server:show-edit-stats"
             }
           ]
         }

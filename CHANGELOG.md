@@ -1,3 +1,179 @@
+
+
+## 0.4.0
+
+### New tools (P1–P8 from llm-edit-failure-modes.md)
+
+**Edit**
+- `get-region` — Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed.
+- `delete-block` — Delete lines between two content anchors (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed.
+- `replace-block` — Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs).
+
+**Debugging**
+- `get-edit-stats` — Return per-tool edit statistics for the current session: hits, fail reasons (`noMatch`, `whitespace`, `partialMatch`, `outOfScope`, `afterNotFound`, `wrongOccurrence`), hint usage, fuzzy-whitespace commit count, average `old_str` length, and dry-run count. Pass `reset:true` to zero all counters after reading.
+- `session-notes` — Persistent cross-session LLM notes. `action:write` appends a note (failures, fixes, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Survives server restarts. Stored in `session-notes.json` in the package root. Optional `project` field groups notes by codebase. This is the mechanism that turns per-session failure reasoning into persistent cross-session memory.
+
+### New features on existing tools
+
+**`str_replace`**
+- `afterHint` — Start the search after the first occurrence of a content string in the file. Content-stable equivalent of `lineHint`, immune to line-number drift.
+- `betweenHint: { start, end }` — Restrict the search to the region between two anchor strings. More precise than `afterHint` alone; useful for switch cases, struct blocks, `#ifdef` regions.
+- `occurrence:N` — Replace the Nth match instead of the first. Fixes duplicate-pattern confusion without needing to widen `old_str`.
+- `fuzzyWhitespace:true` — Match ignoring per-line indentation differences; commit using the buffer's actual whitespace. Eliminates the most common retry loop (fail → read → fix indent → retry).
+
+**`insert`**
+- `afterContent` / `beforeContent` — Content-anchored insert: find the anchor string and insert after/before it. Immune to line-number drift. Preferred over `insert_line` wherever possible. Supports `functionHint` and `occurrence:N` for scoping.
+
+### Edit Stats panel (Pulsar UI)
+
+- **Packages → MCP Server → Show Edit Stats...** opens a live stats panel showing hits, fail reasons, hint usage, and fuzzy-whitespace commit counts per tool for the current session.
+- A **Reset Counters** button zeroes all session stats without requiring a server restart.
+- Also accessible via right-click context menu on any editor.
+
+### Stats instrumentation in mcp-registration.js
+
+- Module-scope `editStats` accumulator tracks per-tool hits, fails (classified by reason), hint usage, dry-run count, and `_oldStrLenSum` (used to compute `avgOldStrLines` on read).
+- `getEditStats()` and `resetEditStats()` exported for use by the Pulsar UI panel.
+- Stats reset on server restart; optionally resetable mid-session via tool or panel.
+
+---
+
+## 0.3.0
+
+### Breaking renames
+
+- `replace-text` → **`str_replace`** — aligns with the Claude Code / Cline convention and makes the tool's primary behaviour (exact-string replacement) unambiguous.
+- `insert-text-at-line` → **`insert`** — shorter, consistent with the Claude Code `insert` tool.
+
+Any existing prompts or system instructions that reference the old names must be updated.
+
+### New features on existing tools
+
+**`str_replace` (formerly `replace-text`)**
+- `functionHint` — scope the search to a named function body only. The match is rejected if `old_str` is not found inside that function. Immune to line-number drift; preferred for JS/C edits.
+- `lineHint` — start the search at or after a specific 1-based line. Useful when the same text appears multiple times and `functionHint` is not applicable.
+- `dryRun` — preview the match and surrounding context without writing. Returns matched lines with `►` markers. Commit by re-calling without `dryRun`.
+- **Smart failure diagnostics** — on a no-match, the tool now: (a) reports whitespace/indentation differences line-by-line for each `old_str` line whose trimmed content exists in the buffer, (b) reports partial consecutive-line match count before divergence, (c) finds the closest fuzzy area via word-scoring and shows it with line numbers. Consecutive failure counter triggers a tool-switch suggestion after 3 failures.
+
+**`insert` (formerly `insert-text-at-line`)**
+- `dryRun` — preview what will be inserted and where, with surrounding context, before committing.
+- Out-of-range line numbers now return a diagnostic with the end-of-file context and a failure counter.
+
+**`delete-line-range`**
+- `dryRun` — shows the lines that would be deleted (marked `✂`) with surrounding context before committing.
+- Out-of-range inputs now surface a diagnostic with the end-of-file context.
+
+**`replace-all`**
+- `dryRun` — previews all match locations (up to 20 shown) before committing. Fuzzy area hint on zero-match responses.
+
+**`replace-function-body`**
+- `dryRun` — shows current function span with `►` markers and the replacement diff before committing.
+- Warns when the first line of `newBody` differs from the existing signature (silent signature-change risk).
+- On not-found: fuzzy function-name scoring suggests the closest matching names in the file.
+
+**`apply-patch`**
+- `dryRun` — validates the patch and shows a compact `+/-` diff of what would change without writing.
+- Large-edit warning when a patch touches more than 30% of the file — suggests `replace-document` or `replace-function-body` for better token efficiency.
+- On failure: fuzzy context-line scoring finds the closest matching area in the buffer and shows it with line numbers.
+
+**`grep-file`**
+- `filePath` is now optional — omit to search the active editor buffer directly.
+
+**`get-file-summary`** and **`get-includes-and-defines`**
+- `filePath` is now optional — omit to summarise the active editor.
+
+### Moved to correct group
+
+- `get-active-editor-info` — now correctly documented in the **Navigation** group (it was erroneously listed under Core in the README).
+
+---
+
+## 0.2.0
+
+### New Tools
+
+**File Operations**
+- `move-file` — Move or rename a file. If the file is open in a Pulsar tab the buffer is retargeted in-place using `buffer.setPath()`, preserving full undo history.
+- `copy-file` — Copy a file to a new path and open the copy in a new tab.
+- `rename-file` — Rename a file within its current directory. Tab retargeted in-place; undo history preserved.
+- `create-folder` — Create a directory (and any missing parents) at a given path.
+- `rename-folder` — Rename or move a folder. All open editor tabs inside the folder are retargeted to their new paths automatically; undo history preserved per tab.
+- `read-lines` — Read a specific line range from any file without loading the whole file. Buffer-first when the file is open in Pulsar.
+- `file-line-count` — Return the line count of any file without loading its content. Buffer-first when the file is open in Pulsar.
+- `apply-patch` — Apply a unified diff patch to the active editor buffer. Context-line anchored so it survives minor line number drift. Tracks consecutive failure count and suggests alternative tools after repeated failures. Supports `dryRun` mode.
+- `list-project-functions` — List every function definition across all project files (or a glob-filtered subset).
+- `replace-function-body` — Atomically replace a named function's full signature and body in the active editor in a single operation, avoiding line-number shifting.
+- `replace-all` — Replace all occurrences of a string in the active editor.
+- `replace-across-files` — Find and replace across all project files with glob filtering and `dryRun` support. Open files updated via buffer (undo preserved); closed files written to disk.
+
+**Navigation**
+- `goto-line` — Jump the cursor to a specific line (and optional column) in the active editor.
+- `list-open-files` — List all files currently open in editor tabs.
+- `get-surrounding-context` — Return lines around a target line without loading the whole file.
+- `get-active-editor-info` — Quick metadata check (filename, line count, cursor position, language, modified status) without loading the full document.
+
+**Safety**
+- `checkpoint` — Save a named in-memory snapshot of the current buffer, restorable with `restore-checkpoint`.
+- `restore-checkpoint` — Restore the buffer to a named checkpoint.
+- `list-checkpoints` — List all saved in-memory checkpoints.
+- `diff-preview` — Show a unified diff of proposed changes without applying them.
+
+**Search**
+- `grep-file` — Search a file for a pattern and return matching lines. Reads from the live buffer when the file is open in Pulsar.
+- `grep-project` — Search all project files for a pattern.
+- `search-symbol` — Find all uses of a C symbol across project files using whole-word matching.
+
+**Diagnostics**
+- `get-diagnostics` — Syntax-check the active C/C++ file (or all project C/C++ files) using the available compiler (gcc / clang / cl). Runs against the saved file on disk.
+
+**Debugging**
+- `get-debug-log` — Return recent MCP tool call log entries. Supports `tail`, `filter` by keyword, and `clear`.
+
+**Highlight**
+- `highlight-range` — Visually highlight a line range in the active editor with a timed fade.
+
+**Core additions**
+- `get-file-summary` — Structural summary of a file: functions, includes, defines, and TODOs.
+- `save-all` — Save all modified open editor tabs in one call.
+- `list-tools` — List every tool with group and enabled/disabled status. Intended as a session-start call so the LLM knows what is available without loading all schemas.
+- `enable-group` — Enable a disabled tool group at runtime without reloading Pulsar.
+
+**Ghidra group** (disabled by default)
+- Full suite of Ghidra reverse-engineering tools: `list-functions`, `search-functions`, `get-function-body`, `get-xrefs`, `add-comment`, `get-function-list-with-comments`.
+
+### Improvements
+- **Buffer-first reads** — `read-file`, `read-lines`, `grep-file`, `get-includes-and-defines`, and `file-line-count` all read from the live Pulsar buffer when a file is open, so unsaved edits are always visible without requiring a save first.
+- **Lazy-load tool discovery** — Tools are grouped and schemas are only sent to the LLM when a group is first used, reducing per-session token overhead.
+- **Tool groups** — All tool groups can be enabled/disabled in Settings. Groups can be re-enabled at runtime by the LLM via `enable-group` with no Pulsar restart needed.
+- **Windows support** — `run-command` auto-detects PowerShell on Windows. Glob matching is normalised for Windows paths.
+- **apply-patch failure tracking** — consecutive patch failures are counted per session; after 3 failures the tool advises the LLM to switch strategy.
+- **Decoration system** — Edited lines are highlighted in the editor after every MCP edit operation, with an 8-second fade.
+- **Bug fix** — Removed duplicate `const resolvedSrc` declaration in `rename-folder` that caused a parse error on server startup.
+- **Stale description fixes** — `move-file` and `rename-folder` tool descriptions and catalogue entries updated to correctly reflect that open tabs are retargeted in-place (undo history preserved), not closed and reopened.
+- **Emergency revert system** — Server source files (`mcp-registration.js`, `pulsar-edit-mcp-server.js`, `ghidra-tools.js`) are automatically snapshotted on every Pulsar startup and on every save. Up to 5 timestamped backups per file are kept in `.mcp-backups/` (gitignored). A restore modal is accessible via `Ctrl+Alt+Shift+R`, the right-click context menu, or the Packages menu — completely independent of the MCP server so it works even when the server is crashed. Restoring writes the file to disk, updates the open buffer in Pulsar if the file is open, and restarts the MCP server automatically. Note: if the package itself failed to load due to a parse error, a Packages → Reload Packages or full Pulsar restart is still needed after restoring.
+
+---
+
 ## 0.1.0 - First Release
-* Every feature added
-* Every bug fixed
+
+Initial development based on:
+* https://github.com/coppolaf/pulsar-edit-mcp-server/commit/f24558a80339c11f8dc063571aa12f9e1f3221b5
+
+### Tools included at fork point
+- `replace-text` — Search the active editor for `query` and replace it with `replacement`.
+- `get-context-around` — Return up-to `radiusLines` lines before and after the N-th match of `query` in the active editor.
+- `find-text` — Search the active editor for a substring or regular expression and return positions of each occurrence.
+- `replace-document` — Replace entire contents of the document.
+- `insert-line` — Insert a blank line at row.
+- `insert-text-at-line` — Insert a block of text at a specified line number, shifting existing text down.
+- `delete-line` — Delete a single line.
+- `delete-line-range` — Delete a range of lines.
+- `get-selection` — Get the selected text.
+- `get-document` — Get an array of each line in the document with line numbers.
+- `get-line-count` — Get the total number of lines in the current document.
+- `get-filename` — Get the filename of the current document.
+- `get-full-path` — Get the full path of the current document.
+- `get-project-files` — Get all project files in the current project.
+- `open-file` — Open a file (or move to that file's tab if already open).
+- `undo` — Undo the last change in the editor.
+- `redo` — Redo the last undo in the editor.
