@@ -1,4 +1,4 @@
-# LLM Edit Tool — Failure Modes & Proposed Improvements
+# LLM Edit Tool — Failure Modes & Implemented Strategies
 
 ## Context: How other tools handle this
 
@@ -6,6 +6,7 @@ Before the proposals, it's worth knowing what Claude Code and Cline actually do 
 the comparison shows where pulsar-edit-mcp-server is already ahead, and where gaps remain.
 
 ### Claude Code (`str_replace` / Edit tool)
+
 - Exact string match only — `old_string` must appear **exactly once** in the file
 - If it appears more than once, Claude is expected to widen `old_string` with enough
   surrounding context to make it unique, or use `replace_all: true`
@@ -14,6 +15,7 @@ the comparison shows where pulsar-edit-mcp-server is already ahead, and where ga
 - Falls back to `write_to_file` (full rewrite) when `str_replace` fails repeatedly
 
 ### Cline (`replace_in_file`)
+
 - Uses a SEARCH/REPLACE block format similar to unified diff
 - Same fundamental problems — widely reported in their GitHub issues:
   "The diff edit fails a lot more often than when it works. It makes it eat tokens like
@@ -25,6 +27,7 @@ the comparison shows where pulsar-edit-mcp-server is already ahead, and where ga
   problem across all models they support
 
 ### Summary
+
 Neither tool has `functionHint`, `lineHint`, `dryRun`, whitespace mismatch reporting,
 partial match counting, or fuzzy area location. The failure diagnostics and anchoring
 system in pulsar-edit-mcp-server are genuinely novel. The proposals below extend that
@@ -35,6 +38,7 @@ lead further.
 ## Known LLM Edit Failure Modes
 
 ### 1. Line number drift (most fundamental)
+
 **What happens:** The LLM reads the file at turn N and gets line numbers. Edit 1 shifts
 everything below it. By edit 2 the line numbers in the LLM's head are wrong but it has
 no way to know that. Any line-number-based tool (insert, delete-line-range, patches) is
@@ -48,19 +52,23 @@ position. `insert` and `delete-line-range` warn about shift and return `newLineC
 ---
 
 ### 2. Whitespace / indentation mismatch (most common failure)
+
 **What happens:** The LLM generates `old_str` from memory, normalising indentation —
 tabs become spaces, 4-space becomes 2-space, trailing spaces are dropped. The content is
 right but the match fails.
 
 **Current mitigation:** On failure, `str_replace` reports per-line whitespace differences
 showing the search text vs buffer text side-by-side. No additional read needed to fix.
+`fuzzyWhitespace: true` eliminates the retry entirely by matching on trimmed-per-line
+content and applying the replacement using the buffer's actual indentation.
 
-**Gap:** Still requires a retry call. Could be eliminated entirely with fuzzy-whitespace
-commit (see proposals).
+**Live data (lifetime stats):** 2 whitespace failures observed, both recovered via
+`fuzzyWhitespaceCommits` (auto-commit). Zero retries needed for whitespace in those cases.
 
 ---
 
 ### 3. Multiline old_str reconstruction from memory
+
 **What happens:** The LLM subtly rewrites `old_str` — paraphrases a comment, changes a
 variable name slightly, drops a blank line. Looks right to a human but fails exact match.
 
@@ -72,219 +80,262 @@ before divergence. Fuzzy word-scoring shows the closest area in the file.
 ---
 
 ### 4. Duplicate pattern confusion
+
 **What happens:** The same block appears multiple times (error handlers, struct
 initialisers, repeated boilerplate). `str_replace` hits the first occurrence which may
 not be the intended one. The LLM usually doesn't notice until the code breaks.
 
-**Current mitigation:** `functionHint` scopes to a named function body.
-
-**Gap:** No solution when there's no function boundary — anonymous blocks, repeated
-patterns within the same function, repeated patterns across non-function scopes.
+**Current mitigation:** `functionHint` scopes to a named function body. The ambiguity
+guard (S1) blocks the edit entirely if `old_str` matches more than one location and no
+scope hint is set, forcing the LLM to be explicit before proceeding.
 
 ---
 
 ### 5. Off-by-one on block boundaries
+
 **What happens:** The LLM tries to replace a function or block but gets the closing brace
 wrong by one line — either including the start of the next function or leaving a stray `}`.
 
 **Current mitigation:** `replace-function-body` does brace-matching itself so the LLM
-only needs to name the function.
+only needs to name the function. `replace-block` extends this to arbitrary anchor strings.
 
-**Gap:** Only works for named functions. Anonymous blocks, loops, conditionals have no
-equivalent.
+**Gap:** Only works when a clear anchor string or function name is available.
 
 ---
 
 ### 6. Stale context / attention window truncation
+
 **What happens:** On large files `get-document` returns so much text that by the time the
 LLM is generating its edit, the top of the file has scrolled out of its attention window.
 It then generates `old_str` from reconstruction rather than the actual text.
 
-**Current mitigation:** `get-file-summary`, `read-lines`, `grep-file`, `file-line-count`
-all exist to bring only relevant content into context.
-
-**Gap:** The LLM has to choose the right tool. On very large files, even `read-lines`
-over a large range can be too much. No content-anchored "give me just this region" tool.
+**Current mitigation:** `get-file-summary`, `read-lines` (hint-based), `grep-file`,
+`grep-project`, `search-symbol`, `find-text`, and `get-region` all exist to bring only
+relevant content into context. `read-lines` can resolve a region by `functionHint`,
+`afterHint`, `betweenHint`, `lineHint`, or `centerLine`+`radius` — no line numbers needed.
 
 ---
 
-### 7. Patch header line numbers (why you gave up on patches)
+### 7. Patch header line numbers (why patches were abandoned)
+
 **What happens:** The LLM generates `@@ -47,6 +47,8 @@` from its stale mental model. Even
 if the context lines are correct the diff library can reject the hunk if the header is
-too far off. The fuzz factor helps but can't save it if content itself has drifted.
+too far off.
 
 **Current mitigation:** `apply-patch` uses context-line anchoring with fuzz factor, tracks
 failures, and suggests switching to `str_replace` or `replace-function-body` after 3
 failures.
 
-**Gap:** Patches are fundamentally the wrong format for LLM use. The failure rate is
-structural, not fixable by better tooling. The current tool is best treated as a
-last-resort / human-provided path.
+**Status:** Patches are structurally the wrong format for LLM-generated edits. `apply-patch`
+is best treated as a last-resort / human-provided path only.
 
 ---
 
-## Proposed Improvements
+### 8. LLM defaults to fragile tools despite better options being available (most persistent)
 
-### P1 — `occurrence: N` on `str_replace`
-**Fixes:** Duplicate pattern confusion (failure mode 4)  
-**Effort:** Low — small addition to the existing match loop  
-**How:** Add an `occurrence` parameter (default 1). The existing line-by-line scan already
-finds all matches; just skip the first N-1 and take the Nth.  
-**Value:** Immediately fixes the most common case where the same error-handling block or
-struct initialiser appears multiple times.
+**What happens:** The LLM reaches for familiar, low-friction tools — `read-lines` with a
+`lineHint` (line number), `str_replace` without any anchor hints — even when the file is
+large, the pattern is duplicated, and better tools exist. The sophisticated tools
+(`replace-function-body`, `replace-block`, `afterHint`, `betweenHint`, `occurrence`) go
+unused not because they don't work but because the LLM never reaches for them unless
+forced to by a failure.
 
+**Live data (lifetime stats):**
 ```
-str_replace({
-  old_str: "return -1;",
-  new_str: "return ERR_TIMEOUT;",
-  occurrence: 3          // replace the 3rd occurrence only
-})
+str_replace:           18 hits, 4 fails
+replace_function_body:  0 hits
+replace_block:          0 hits
+dryRuns (all tools):    0
+
+str_replace hint usage:
+  lineHint:       12   ← fragile (line numbers drift)
+  functionHint:    8   ← stable
+  afterHint:       0   ← never used
+  betweenHint:     0   ← never used
+  occurrence:      0   ← never used
 ```
+
+`lineHint` is used 50% more than `functionHint`. Content-anchored alternatives
+(`afterHint`, `betweenHint`) are never used. `replace-function-body` and `replace-block`
+— which eliminate whole classes of failure — have zero hits. `dryRun` has never been
+used voluntarily across any tool.
+
+**Important caveat:** These stats were gathered with a capable model (Claude Sonnet).
+With a weaker LLM the failure rate on `str_replace` would be higher, `old_str`
+reconstruction from memory would be less accurate, and tool selection would be even
+more conservative. The tool-selection problem does not improve with model quality alone
+— it is a structural default, not an intelligence problem.
+
+**Why reactive mitigations are insufficient:** The smart suggestion engine (S2) fires on
+failure and nudges toward better tools. The success nudge fires on successful `str_replace`
+when no hints were used on a large file. Neither changes the default behaviour reliably
+because the LLM is succeeding often enough (18/22 on `str_replace`) that it is rarely
+corrected. Success reinforces the fragile default path.
+
+**What session notes with explicit tool guidance actually did:** In longer sessions,
+adding specific tool guidance to session notes — e.g. "use `replace-function-body` for
+all function edits on this file" — demonstrably reduced failure rates. The LLM followed
+the guidance and reached for the better tools. However it produced a consistent side
+effect: the LLM narrated its tool use at every step ("I'll use `replace-function-body`
+here as the session notes suggest"), signalling compliance rather than acting naturally.
+It was working but performing at the same time — pattern-matching to the instruction and
+announcing the match rather than reasoning from context.
+
+Weaker models do this more aggressively, not less. The narration is the tell that the
+behaviour is rule-following rather than internalised judgment.
+
+**Why this matters for tool design:** Session notes guidance is worth using — it measurably
+reduces failures — but it is not a complete solution. The LLM is complying with an
+instruction it found in context, not reasoning about the edit. If the instruction is
+absent, ambiguous, or doesn't quite fit the situation, the behaviour reverts. And the
+narration adds noise to every session.
+
+The ideal is the LLM reaching for the right tool because the context makes it obvious,
+not because a rule told it to. Making the *wrong tool more expensive at the point of use*
+is more reliable than instructions — the ambiguity guard doesn't tell the LLM to use
+hints, it blocks and forces a retry. P9 (file metadata at open time, no instructions)
+is the proposed complement: an LLM that can see "850 lines, 14 functions, largest 120
+lines" may naturally reach for `replace-function-body` without being told to. A rule
+says "do this"; information makes the right tool the obvious fit.
+
+**Proposed mitigations:** See P9–P11 below.
 
 ---
 
-### P2 — `afterHint` on `str_replace`
-**Fixes:** Duplicate pattern confusion when there's no function boundary (failure mode 4)  
-**Effort:** Low — same as `lineHint` but anchor is a content string not a line number  
-**How:** Search for `afterHint` string in the buffer, find its line, then begin the
-`old_str` search from that point. Content-stable equivalent of `lineHint`.
+## Proposals
 
-```
-str_replace({
-  old_str: "x = 0;",
-  new_str: "x = DEFAULT_VAL;",
-  afterHint: "case STATE_INIT:"   // find old_str only after this landmark
-})
-```
+### Status of original proposals (P1–P8)
 
----
+| Proposal | Description | Status |
+|---|---|---|
+| P1 | `occurrence: N` on `str_replace` | ✅ Implemented |
+| P2 | `afterHint` on `str_replace` | ✅ Implemented |
+| P3 | Fuzzy whitespace commit | ✅ Implemented |
+| P4 | `betweenHint` on `str_replace` | ✅ Implemented |
+| P5 | Content-anchored `insert` (`afterContent`/`beforeContent`) | ✅ Implemented |
+| P6 | `delete-block` (content-anchored delete) | ✅ Implemented |
+| P7 | `replace-block` (generalised replace-function-body) | ✅ Implemented |
+| P8 | `get-region` (content-anchored read-lines) | ✅ Implemented |
 
-### P3 — Fuzzy whitespace commit on `str_replace`
-**Fixes:** Whitespace/indentation mismatch (failure mode 2) — eliminates the retry entirely  
-**Effort:** Medium  
-**How:** When exact match fails but trimmed-per-line content matches, offer two paths:
-- `fuzzyWhitespace: true` flag — match ignoring leading/trailing whitespace per line,
-  then apply replacement using the buffer's actual indentation (not the LLM's version)
-- Or surface as a specific failure type with a one-call fix: "set fuzzyWhitespace:true
-  to commit using buffer indentation"
-
-This turns the most common failure class from **fail → read → retry** into
-**fail → retry with flag**.
+All P1–P8 proposals are live. The remaining open work is the tool-selection problem
+(failure mode 9), addressed by P9–P11 below.
 
 ---
 
-### P4 — `betweenHint` on `str_replace`
-**Fixes:** Duplicate pattern confusion for content between two landmarks (failure mode 4)  
-**Effort:** Medium  
-**How:** Scope the `old_str` search to between two anchor strings. More precise than
-`afterHint` alone. Useful for switch cases, struct blocks, `#ifdef` regions.
+### P9 — File metadata note on `open-file`
 
-```
-str_replace({
-  old_str: "timeout = 100;",
-  new_str: "timeout = CONNECT_TIMEOUT_MS;",
-  betweenHint: { start: "case MODE_CONNECT:", end: "break;" }
-})
-```
+**Fixes:** LLM defaults to fragile tools (failure mode 9)
+**Effort:** Low
+**How:** When `open-file` is called, append a compact metadata block to the response
+alongside the file content: line count, detected language, number of functions, largest
+function sizes. No instructions — just facts about the file.
 
----
-
-### P5 — `insert-after` / `insert-before` (content-anchored insert)
-**Fixes:** Line number drift on insert (failure mode 1)  
-**Effort:** Medium  
-**How:** Instead of `insert_line` (a number that drifts), accept an anchor string and
-insert before/after its first (or Nth) occurrence. Combines with `functionHint` for
-maximum precision.
-
-```
-insert({
-  new_str: "LOG(\"entered loop\");",
-  afterContent: "while (retries < MAX_RETRIES) {",
-  functionHint: "connect_with_retry"
-})
-```
-
-This is the content-anchored equivalent of `insert` — line numbers never needed.
+The goal is to provide information that makes the right tool the obvious choice, rather
+than rules that get performed. An LLM that can see "850 lines, 14 functions, largest 120
+lines" naturally reaches for `replace-function-body` on function edits. An LLM that only
+sees raw file content has no basis for that choice until after a failure.
 
 ---
 
-### P6 — `delete-block` (content-anchored delete)
-**Fixes:** Line number drift on delete (failure mode 1), off-by-one on block boundaries
-(failure mode 5)  
-**Effort:** Medium-High  
-**How:** Given a start anchor string and an end anchor string (or brace-match mode), find
-and delete the block between them. The LLM identifies the block by content, not line
-numbers.
+### P10 — `lineHint`-only warning on `str_replace`
 
-```
-delete-block({
-  startContent: "// BEGIN legacy path",
-  endContent:   "// END legacy path"
-})
-```
+**Fixes:** LLM defaults to fragile tools (failure mode 9), line number drift (failure mode 1)
+**Effort:** Low
+**How:** When `str_replace` succeeds but `lineHint` was the only hint used (no
+`functionHint`, `afterHint`, or `betweenHint`), append a soft warning to the success
+response noting that line numbers drift after edits and content anchors are more stable.
 
-Or brace-match mode: given a function name or opening line, delete from `{` to matching `}`.
+This makes the fragile choice visible at the moment of every use, not only after failure.
+It is a cost signal at the point of the call, not a rule that may not be in context.
 
 ---
 
-### P7 — `replace-block` (generalised replace-function-body)
-**Fixes:** Off-by-one on block boundaries for non-function blocks (failure mode 5)  
-**Effort:** Medium-High  
-**How:** Same brace-matching logic as `replace-function-body` but triggered by any anchor
-string, not just a function name. Finds the next `{` after the anchor and matches to
-its closing `}`.
+### P11 — Escalating `dryRun` prompt for large `old_str`
 
-```
-replace-block({
-  anchor: "if (mode == LEGACY_MODE) {",
-  newBody: "if (mode == LEGACY_MODE) {\n  return handle_legacy();\n}"
-})
-```
+**Fixes:** LLM never uses `dryRun` voluntarily (failure mode 9)
+**Effort:** Low
+**How:** When `str_replace` is called with `old_str` longer than N lines (e.g. 8) and
+`dryRun` was not set, append to the success response a note that the edit committed
+without verification. On failure of a large `old_str`, escalate this to a blocking
+suggestion rather than a soft nudge.
 
----
-
-### P8 — `get-region` (content-anchored read-lines)
-**Fixes:** Stale context / attention truncation on large files (failure mode 6)  
-**Effort:** Low  
-**How:** Return lines between two anchor strings rather than between line numbers.
-Content-stable equivalent of `read-lines`. The LLM can ask for "the HAL_Init block"
-without knowing its line number.
-
-```
-get-region({
-  startContent: "void HAL_Init(void) {",
-  endContent:   "} // end HAL_Init"
-})
-```
+`dryRun` has been zero across the entire lifetime stats. The LLM has never used it
+voluntarily. The tool needs to make the cost of skipping it visible at the point of
+large edits, not rely on the LLM remembering it is available.
 
 ---
 
-## Priority Order
+## Implemented Strategies (May 2026)
 
-| Priority | Proposal | Fixes | Effort | Impact |
-|---|---|---|---|---|
-| 1 | `occurrence: N` on `str_replace` | Duplicate patterns | Low | High |
-| 2 | Fuzzy whitespace commit | Whitespace mismatch | Medium | Very high — eliminates most common failure |
-| 3 | `afterHint` on `str_replace` | Duplicate patterns (no fn boundary) | Low | High |
-| 4 | `get-region` | Large file attention truncation | Low | Medium-High |
-| 5 | Content-anchored `insert` | Line drift on insert | Medium | High |
-| 6 | `betweenHint` on `str_replace` | Duplicate patterns (bounded) | Medium | Medium |
-| 7 | `replace-block` | Off-by-one, non-function blocks | Medium-High | Medium |
-| 8 | `delete-block` | Line drift on delete | Medium-High | Medium |
+### S1 — Ambiguity guard: block before wrong-occurrence commit
+
+**Problem being solved:** LLMs generate `old_str` from memory of what they read. Common
+short patterns (`return null`, `if (!editor)`, `const buffer = editor.getBuffer()`,
+callback names) appear dozens of times in a file. The LLM picks one confidently, hits
+the wrong occurrence, and silently corrupts the file.
+
+**Why earlier approaches were insufficient:** `occurrence:N` and `functionHint` both
+exist, but they require the LLM to *know* that the pattern repeats and to pre-emptively
+use them. The LLM frequently doesn't know.
+
+**Strategy implemented:** Before committing, `str_replace` counts all occurrences of
+`effectiveOldStr` in the full file. If `totalMatches > 1` AND no scope hint is set, the
+edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing every matching line
+number. Scan capped at 20 matches. `occurrence > 1` disables the guard.
+
+Extended to `replace-block`, `replace-function-body`, and `delete-block` via a shared
+`ambiguityCheck()` helper. For `replace-function-body`, a regex scan counts
+definition-like occurrences (`name\s*\(`) only — not call sites.
+
+**Why the guard belongs in the tool, not the prompt:** Prompt instructions like "always
+check for duplicates before editing" are forgotten mid-conversation. Tool-enforced
+blocking fires unconditionally at the exact moment the mistake would have been made.
+This is the same principle as P9–P11: structural cost at the point of the wrong choice,
+not rules written elsewhere.
 
 ---
 
-## Notes on patches
+### S2 — Smart suggestion engine: feedback at the moment of failure
 
-Unified diff / patch format is structurally the wrong tool for LLM-generated edits
-because it requires the LLM to know correct line numbers at generation time — which it
-cannot reliably do. The content-anchored tools above (`str_replace` with hints,
-`replace-function-body`, and the proposed `replace-block`) cover the same use cases
-without the line-number dependency.
+**Problem being solved:** The previous failure suggestion system fired after 3 consecutive
+failures. By that point the LLM had already made 2 wrong calls and was likely looping.
 
-`apply-patch` is best kept for human-provided patches or cases where the LLM is applying
-a diff it received from an external source (e.g. a git diff), not generating one itself.
+**Strategy implemented:** `smartSuggestion(ctx)` fires on **failure #1**:
 
+- No hints used → lists the specific hints that apply, with concrete syntax examples
+- `old_str` looks like a whole function → suggests `replace-function-body`
+- `old_str` looks like a brace block → suggests `replace-block`
+- File >500 lines AND no hints → adds file-size urgency text
+- Escalates to tool-switch suggestions at failure #2
+
+`successNudge(ctx)` appended to `str_replace` **success** responses when no hints were
+used on a file >300 lines. Tells the LLM which hints to use next time.
+
+**Known limitation (from live stats):** The success nudge is not reliably changing
+behaviour. With an 18/22 success rate on `str_replace`, the failure path fires
+infrequently. `lineHint` is still used 50% more than `functionHint`, and content-anchored
+alternatives remain at zero. Reactive feedback after failure is insufficient — the
+default is set before the first edit attempt. P9 (file metadata at open time) is the
+proposed complement, providing information that shapes the choice rather than correcting
+it after the fact.
+
+---
+
+### S6 — Inline linter feedback on edit tool responses (`lint: true`)
+
+**Problem being solved:** Edits that succeed syntactically but introduce lint errors are
+invisible to the LLM. It moves on assuming the edit was clean, and errors surface only
+when something breaks downstream — if at all.
+
+**Strategy implemented:** All six edit tools accept a `lint: true` parameter. When set,
+the linter runs automatically after commit, scoped to the edited line range, and any
+errors or warnings are appended to the tool response. The LLM sees lint feedback in the
+same response as the edit result, at the moment the edit is made, rather than discovering
+problems in a separate diagnostic call later.
+
+**Known gap:** For deletion tools, the deleted lines are gone so lint scope is a fixed
+neighbourhood around the deletion point. Full-function scoping would be more accurate
+but is left as a future improvement.
 
 ---
 
@@ -292,467 +343,141 @@ a diff it received from an external source (e.g. a git diff), not generating one
 
 ### What other tools do
 
-**Claude Code** — has opt-in telemetry sent to Anthropic's servers. A third-party tool
-(`cc-telemetry`) scrapes local session transcript files after the fact to compute overall
-tool success rates. One community member built a status line script that shows a single
-aggregate warning ("82% tool success") when the rate drops below 90%. That's counting
-errors, not classifying why they failed. No per-tool, per-reason breakdown exists.
+**Claude Code** — opt-in telemetry sent to Anthropic. A third-party scraper computes an
+aggregate success rate from transcripts after the fact. No per-tool, per-reason breakdown.
+The running agent never sees it mid-session.
 
-**Cline** — no instrumentation at all. Their failure data comes entirely from user bug
-reports on GitHub, which is why the same failure modes (whitespace mismatch, SEARCH block
-out of order, diff edit failed) stay open as issues for months with no resolution.
+**Cline** — no instrumentation. Failure data comes from user bug reports. Same failure
+modes stay open for months.
 
 **Cursor** — no public tooling stats or failure instrumentation.
 
-**Summary** — no existing tool has per-tool, per-failure-reason instrumentation built into
-the editor server itself. The closest anything gets is a single aggregate success/fail
-count scraped from logs after the session ends.
+No existing tool has per-tool, per-failure-reason instrumentation built into the server
+itself that the LLM can query mid-session.
 
 ---
 
-### What makes in-server stats different
+### What in-server stats provide
 
-The critical gap in all existing approaches is **failure reason classification at the
-point of failure**. They know something failed. They don't know why — whitespace mismatch,
-partial match, no match, out of range, wrong occurrence. That distinction is what makes
-the data actionable for development.
+Two properties make built-in stats uniquely valuable:
 
-Two additional properties make built-in stats uniquely valuable here:
+**1. Queryable by the LLM mid-session** — `get-edit-stats` lets the LLM see its own
+failure patterns during a session and adjust strategy. None of the other tools support
+this.
 
-**1. Queryable by the LLM mid-session**
-A `get-edit-stats` tool means the LLM can see its own failure patterns during a session
-and adjust strategy — e.g. "str_replace has failed 4 times on whitespace, switch to
-fuzzyWhitespace mode". None of the other tools support this. They're all post-hoc
-external scrapers.
-
-**2. Completely local**
-No data leaves Pulsar. No dependency on Anthropic telemetry infrastructure or third-party
-services. The LLM can query it directly, reset it, and act on it in the same session.
+**2. Lifetime accumulation** — Session stats reset per session. Lifetime stats accumulate
+across all sessions and survive restarts (persisted to `edit-stats.json`). This solves
+cross-session persistence without a separate timestamped log file — the lifetime stats
+architecture is sufficient.
 
 ---
 
-### Proposed implementation
+### What the live data shows
 
-**Module-scope stats accumulator** — persists across tool calls for the session lifetime,
-reset on server restart (same pattern as the existing failure counters):
-
-```javascript
-const editStats = {
-
-  // ── str_replace ────────────────────────────────────────────────────────────
-  str_replace: {
-    hits: 0,
-    fails: {
-      noMatch:         0,  // old_str not found anywhere
-      whitespace:      0,  // content matches but indentation differs
-      partialMatch:    0,  // N of M lines matched then diverged
-      outOfScope:      0,  // functionHint target not found in file
-      betweenNotFound: 0,  // betweenHint start/end anchors not found (proposed)
-      afterNotFound:   0,  // afterHint anchor not found (proposed)
-      wrongOccurrence: 0,  // requested occurrence N doesn't exist (proposed)
-    },
-    hintsUsed: {
-      functionHint:  0,    // existing
-      lineHint:      0,    // existing
-      afterHint:     0,    // proposed P2
-      betweenHint:   0,    // proposed P4
-      occurrence:    0,    // proposed P1
-    },
-    fuzzyWhitespaceCommits: 0,  // times fuzzy whitespace mode saved a retry (proposed P3)
-    dryRunsBeforeCommit: 0,
-    avgOldStrLines: 0,          // rolling average — longer blocks fail more?
-  },
-
-  // ── insert ─────────────────────────────────────────────────────────────────
-  insert: {
-    hits: 0,
-    fails: { outOfRange: 0 },
-    // anchored variants — proposed P5
-    anchored: {                  // used afterContent / beforeContent instead of line number
-      hits: 0,
-      fails: {
-        anchorNotFound:  0,      // afterContent / beforeContent string not in file
-        ambiguousAnchor: 0,      // anchor matched more than once, occurrence needed
-      },
-      hintsUsed: {
-        afterContent:    0,      // insert after this content string
-        beforeContent:   0,      // insert before this content string
-        functionHint:    0,      // scoped to function body
-        occurrence:      0,      // Nth match of anchor
-      },
-    },
-    dryRunsBeforeCommit: 0,
-  },
-
-  // ── delete_line_range ──────────────────────────────────────────────────────
-  delete_line_range: {
-    hits: 0,
-    fails: { outOfRange: 0, inverted: 0 },
-    // anchored variant — proposed P6 delete-block
-    anchored: {
-      hits: 0,
-      fails: {
-        anchorNotFound:   0,     // start/end content string not found
-        braceMatchFailed: 0,     // brace-match mode couldn't find closing brace
-      },
-      hintsUsed: {
-        startContent: 0,         // delete from this anchor string
-        endContent:   0,         // delete to this anchor string
-        braceMatch:   0,         // delete to matching closing brace
-      },
-    },
-    dryRunsBeforeCommit: 0,
-  },
-
-  // ── replace_function_body ──────────────────────────────────────────────────
-  replace_function_body: {
-    hits: 0,
-    fails: { notFound: 0 },
-    signatureChanges: 0,         // newBody first line differs from existing signature
-    dryRunsBeforeCommit: 0,
-  },
-
-  // ── replace_block (proposed P7) ───────────────────────────────────────────
-  // generalised replace-function-body for non-function blocks
-  replace_block: {
-    hits: 0,
-    fails: {
-      anchorNotFound:   0,       // anchor string not found in file
-      braceMatchFailed: 0,       // no { found after anchor, or unmatched braces
-    },
-    hintsUsed: {
-      functionHint: 0,           // anchor is a function name
-      anchorString: 0,           // anchor is an arbitrary content string
-    },
-    dryRunsBeforeCommit: 0,
-  },
-
-  // ── apply_patch ───────────────────────────────────────────────────────────
-  apply_patch: {
-    hits: 0,
-    fails: { contextMismatch: 0, exception: 0 },
-    largeEditWarnings: 0,        // patch touched >30% of file
-    dryRunsBeforeCommit: 0,
-  },
-
-  // ── replace_all ───────────────────────────────────────────────────────────
-  replace_all: {
-    hits: 0,
-    fails: { noMatch: 0 },
-    dryRunsBeforeCommit: 0,
-  },
-
-};
-```
-
-**`get-edit-stats` tool** — new tool in the debugging group alongside `get-debug-log`:
+From `edit-stats.json` (lifetime stats at time of writing):
 
 ```
-get-edit-stats({ reset: false })
+str_replace:    18 hits, 4 fails (whitespace: 2, outOfScope: 2)
+replace_all:     8 hits
+read_lines:      8 hits
+get_diagnostics: 8 hits
+
+replace_function_body: 0 hits
+replace_block:         0 hits
+dryRuns (all tools):   0
+
+str_replace hint usage:
+  lineHint:      12
+  functionHint:   8
+  afterHint:      0
+  betweenHint:    0
+  occurrence:     0
 ```
 
-Returns the current session totals. `reset: true` zeroes all counters after reading.
-The LLM can call this at session start, mid-session when failures cluster, or at the end
-to report what happened.
-
-**Example response:**
-```json
-{
-  "sessionSummary": "34 edits: 28 hits (82%), 6 fails",
-  "str_replace": {
-    "hits": 22, "failTotal": 4,
-    "fails": { "whitespace": 3, "noMatch": 1, "partialMatch": 0,
-               "outOfScope": 0, "afterNotFound": 0, "wrongOccurrence": 0 },
-    "hintsUsed": { "functionHint": 8, "lineHint": 2, "afterHint": 0,
-                   "betweenHint": 0, "occurrence": 0 },
-    "fuzzyWhitespaceCommits": 0,
-    "dryRunsBeforeCommit": 5,
-    "avgOldStrLines": 4.2
-  },
-  "insert": {
-    "hits": 4, "failTotal": 0,
-    "anchored": { "hits": 0, "fails": { "anchorNotFound": 0, "ambiguousAnchor": 0 } },
-    "dryRunsBeforeCommit": 1
-  },
-  "delete_line_range": {
-    "hits": 2, "failTotal": 0,
-    "anchored": { "hits": 0, "fails": { "anchorNotFound": 0, "braceMatchFailed": 0 } },
-    "dryRunsBeforeCommit": 0
-  },
-  "replace_function_body": {
-    "hits": 3, "failTotal": 0,
-    "signatureChanges": 1,
-    "dryRunsBeforeCommit": 2
-  },
-  "replace_block": {
-    "hits": 0, "failTotal": 0,
-    "fails": { "anchorNotFound": 0, "braceMatchFailed": 0 },
-    "dryRunsBeforeCommit": 0
-  },
-  "apply_patch": {
-    "hits": 3, "failTotal": 2,
-    "fails": { "contextMismatch": 2, "exception": 0 },
-    "largeEditWarnings": 1,
-    "dryRunsBeforeCommit": 1
-  },
-  "replace_all": {
-    "hits": 0, "failTotal": 0,
-    "dryRunsBeforeCommit": 0
-  }
-}
-```
-
-**Cross-session persistence (optional, later)** — append each session's stats to a JSON
-file on disk with a timestamp. Even a week of normal use would build enough data to rank
-the improvement proposals by actual observed failure frequency rather than intuition.
-
-```json
-[
-  {
-    "sessionEnd": "2026-05-24T14:32:00",
-    "str_replace": { "hits": 22, "fails": { "whitespace": 3, "noMatch": 1 } },
-    "apply_patch": { "hits": 3, "fails": { "contextMismatch": 2 } }
-  }
-]
-```
+The failure rate on `str_replace` itself is acceptable at 82%. The problem is tool
+selection — the LLM defaults to `str_replace`+`lineHint` and never reaches for the
+tools that eliminate whole failure classes. This is currently the most persistent open
+problem in the system, and these stats represent a *best case*: a capable model on a
+small sample. Weaker models or longer sessions would show considerably worse numbers.
 
 ---
 
-### What the data would answer
+### What the data would answer (open questions)
 
 | Question | Why it matters |
 |---|---|
-| What fraction of str_replace failures are whitespace? | Tells you whether P3 fuzzy whitespace commit is the highest value proposal or not |
-| Do longer old_str blocks fail more? | Validates whether multiline reconstruction (failure mode 3) is a significant issue |
-| Does functionHint reduce failure rate vs unhinted calls? | Validates the entire anchoring approach — if it doesn't help much, deprioritise the other hints |
-| Does afterHint reduce the outOfScope / wrongOccurrence fail rate? | Validates P2 afterHint value once implemented |
-| Does betweenHint further reduce duplicate pattern failures vs afterHint alone? | Tells you whether P4 is worth the added complexity over P2 |
-| Does occurrence:N eliminate the wrongOccurrence fail class? | Validates P1 — should be a near-zero fail rate if working correctly |
-| Do anchored inserts fail less than line-number inserts? | Validates P5 content-anchored insert — if anchorNotFound is rare, it's a clear win |
-| Do failures cluster on large files? | Validates P8 get-region priority |
-| What is dryRun adoption rate? | If LLMs rarely use it voluntarily, failure responses should more strongly suggest it |
-| How often does replace_block anchor fail vs replace_function_body? | Tells you if the generalised block-match approach (P7) is reliable enough to use over function-scoped replacement |
-| Does apply_patch fail more than str_replace? | Quantifies whether keeping apply-patch is worth the maintenance |
-| How often do fuzzyWhitespaceCommits fire? | Tells you how many retries P3 is saving once implemented |
+| Does `afterHint` reduce failure rate vs `lineHint`? | Validates P10 once implemented |
+| Do failures cluster on files >500 lines? | Validates P9 file-size threshold |
+| Does `dryRun` adoption increase after P11? | Validates escalating prompt approach |
+| Does `replace-function-body` usage increase after P9? | Primary metric for tool-selection fix |
+| Do longer `old_str` blocks fail more? | Validates P11 line-count threshold |
+| Does `fuzzyWhitespace` proactive use increase with P10-style nudging? | 2 auto-commits observed; proactive use still zero |
 
 ---
 
 ## Using `session-notes` and `get-edit-stats` — Recommended Workflow
 
-Both tools are implemented and live in pulsar-edit-mcp-server. This section
-documents the intended usage pattern so it can be included in project
-instructions given to the LLM at session start.
-
-### What is available
-
-**`session-notes`** — persistent JSON file on disk, survives server restarts.
-The LLM writes notes (what failed, what worked, what to do differently) and
-reads them back at the start of the next session. Notes are tagged with a
-`project` label so they can be filtered per codebase.
-
-**`get-edit-stats`** — in-memory per-session counters for every edit tool:
-hits, fail reasons, hint usage, dry-run count, fuzzy-whitespace commits,
-average `old_str` line count. Queryable by the LLM mid-session to spot
-failure clusters and adjust strategy. Resets on server restart; can be reset
-manually with `reset:true`.
+Both tools are implemented and live. This section documents the intended usage pattern
+for inclusion in project instructions given to the LLM at session start.
 
 ### Example project instructions (include in system prompt or CLAUDE.md)
 
 ```
 ## Session start — always do this first
 1. Call session-notes({ action: "read", project: "<project-name>" })
-   Read all prior notes for this project. Adjust your edit strategy based on
+   Read all prior notes for this project. Adjust edit strategy based on
    what failed before — indentation style, files that hot-reload on save,
    tools that worked better than others.
 
 2. Call get-edit-stats() to confirm counters are at zero (fresh session).
-   If not, a prior session was interrupted — the non-zero counts are from
-   that session and can be ignored or reset with { reset: true }.
+   If not, a prior session was interrupted — reset with { reset: true }.
 
 ## During the session
-- If str_replace fails more than twice in a row, call get-edit-stats() to
-  classify the failure mode (whitespace? partialMatch? outOfScope?) and
-  adjust accordingly — switch to fuzzyWhitespace:true, widen old_str, or
-  change to replace-function-body.
-- Use afterHint or functionHint on every str_replace where the pattern could
-  appear more than once in the file.
+- If str_replace fails more than once, call get-edit-stats() to classify
+  the failure mode and adjust strategy.
 
 ## Session end — always do this before closing
 1. Call get-edit-stats() to read the session summary.
 2. Call session-notes({ action: "write", project: "<project-name>", note: "..." })
-   Record:
-   - Which tools and hints worked reliably on this codebase
-   - Any failure patterns encountered (e.g. "tabs not spaces", "file
-     hot-reloads on save — don't save mid-edit sequence")
-   - The session stats summary line (hits/fails/%) for later comparison
-   - Anything that would have saved a retry if you'd known it at session start
+   Record: which tools worked reliably, any failure patterns, the session
+   stats summary line, anything that would have saved a retry.
 ```
 
-### Why this closes the cross-session learning gap
+**On including explicit tool guidance in session notes:** Adding specific tool guidance
+to session notes ("use `replace-function-body` for all function edits on this file")
+demonstrably reduces failures in longer sessions — the LLM follows the guidance and
+reaches for better tools. It is worth doing. The side effect is narrated tool use: the
+LLM announces what it is doing and why at every step, signalling that it found the
+instruction and is complying. This is noisy but not harmful.
 
-Claude Code has telemetry, but it is aggregate, deferred, and goes to Anthropic
-for model training — the running agent never sees it mid-session, it is not
-broken down per tool or per failure reason, and it has no awareness of the
-specific codebase being edited. Cline and Cursor have no in-session
-instrumentation at all. In all three cases the agent starts every session with
-zero codebase-specific memory of what caused retries last time.
+The session-notes mechanism is more effective than a static system prompt rule because
+the notes are project-specific, written at the point of actual failure on the actual
+codebase, and read back at session start when the LLM is forming its approach. Generic
+rules in a system prompt are easier to ignore; a note that says "whitespace on
+mcp-registration.js is tabs not spaces — str_replace failed 3 times because of this"
+is specific enough to act on.
 
-The session-notes + get-edit-stats combination is different in three specific
-ways: failure data is classified per tool and per failure reason (not just an
-aggregate pass/fail count), it is written by the agent at the point of failure
-in its own words, and it is read back by the same agent at the start of the
-next session on the same project. The loop is local, immediate, and
-codebase-specific rather than aggregate and deferred.
+### Why this matters
 
----
+Claude Code has telemetry but it is aggregate, deferred, and goes to Anthropic — the
+running agent never sees it mid-session, and it has no awareness of the specific codebase
+being edited. Cline and Cursor have nothing. In all cases the agent starts every session
+with zero codebase-specific memory of what caused retries last time.
 
-## Additional Failure Modes & Proposals (May 2026 Audit)
-
-The following were identified by reviewing the live pulsar-edit-mcp-server
-implementation against the failure modes above. Each represents a gap that
-exists across all current LLM editing tools (Claude Code, Cline, Cursor) and
-that a well-instrumented MCP server is positioned to solve.
-
----
-
-### G1 — Insert failure reasons are unclassified
-
-**What all tools do:** When an insert fails, tools report a generic failure.
-Neither Claude Code nor Cline distinguishes between "the line number was out of
-range" (stale after a prior edit) and "the anchor string doesn't exist in the
-file" (wrong content). Both are reported as the same failure, or not reported
-at all.
-
-**Why it matters:** The remedies are completely different. A stale line number
-means the LLM needs to re-read the file. An anchor string not found means the
-LLM constructed the wrong anchor. Conflating them forces a full read-and-retry
-regardless of cause, adding a wasted tool call every time.
-
-**What a smart server can do:** Classify at the point of failure and return a
-targeted error — "anchor `afterContent` not found" vs "line number out of
-range (file has N lines, you passed M)". The failure response tells the LLM
-exactly what kind of retry is needed, with the minimum context to fix it
-immediately.
-
-**Stats angle:** Separate counters for `anchorNotFound` vs `outOfRange` in
-insert stats let you measure which failure mode actually dominates in practice
-— and therefore which mitigation is worth building first.
+The session-notes + get-edit-stats combination is different in three specific ways:
+failure data is classified per tool and per failure reason; it is written by the agent at
+the point of failure in its own words; and it is read back by the same agent at the start
+of the next session on the same project.
 
 ---
 
-### G2 — Edit failure diagnostics don't cover the size of what failed
+## Notes on patches
 
-**What all tools do:** When a str_replace or equivalent fails, tools report
-that the match wasn't found. None of them record or report how long the
-`old_str` was. The LLM has no feedback on whether it is consistently failing
-on short strings (likely a typo or whitespace issue) or long blocks (likely
-memory reconstruction divergence).
+Unified diff / patch format is structurally the wrong tool for LLM-generated edits
+because it requires correct line numbers at generation time — which the LLM cannot
+reliably produce. The content-anchored tools (`str_replace` with hints,
+`replace-function-body`, `replace-block`) cover the same use cases without the
+line-number dependency.
 
-**Why it matters:** Failure mode 3 (multiline reconstruction from memory)
-gets worse as `old_str` length increases — the LLM is more likely to paraphrase
-a comment or drop a blank line in a 20-line block than in a 3-line one. But
-without size data split by outcome, this is intuition not measurement.
-
-**What a smart server can do:** Track average `old_str` line count separately
-for hits and fails. If `avgOldStrLinesFails` is consistently much higher than
-`avgOldStrLinesHits`, the data confirms that long blocks are the problem and
-that the right mitigation is smaller, more targeted edits — not better
-whitespace handling.
-
-**Stats angle:** Two accumulators — one incremented on success, one on failure
-— answer the question "do longer old_str blocks fail more?" with real session
-data rather than intuition.
-
----
-
-### G3 — No tool tracks whether compound hints reduce failures
-
-**What all tools do:** None of the existing tools (Claude Code, Cline, Cursor)
-have any hint system at all. Even in servers that do implement hints
-(`functionHint`, `occurrence`), the hints are tracked individually — so you
-can see that `functionHint` was used N times, but not whether using
-`functionHint` together with `occurrence:N` (the most precise targeting mode)
-performs better than either alone.
-
-**Why it matters:** If the compound combination eliminates the
-`wrongOccurrence` fail class, that's strong evidence that teaching the LLM
-to always use both when targeting a repeated pattern is worth the prompt cost.
-If it doesn't, the complexity is wasted.
-
-**What a smart server can do:** Track the hint combination as a unit — one
-counter for `functionHint alone`, one for `occurrence alone`, one for both
-together. Three numbers answer whether precision stacks additively.
-
----
-
-### G4 — Session memory doesn't persist or filter across projects
-
-**What all tools do:** Claude Code has telemetry but it is aggregate and feeds
-back into model training — the running agent has no access to it during a
-session and it carries no codebase-specific context. Cline and Cursor have no
-session memory mechanism at all. In all cases the agent starts every session
-from scratch with no knowledge of what caused retries on this specific project
-last time.
-
-**Why it matters:** Repeated failures on the same file or pattern across
-sessions are invisible. The agent re-fails from scratch every time. A session
-that ended with "whitespace on this file is tabs not spaces" is completely lost
-by the next session.
-
-**What a smart server can do:** Persist notes written by the agent across server
-restarts, keyed by project. At session start the agent reads its own prior
-notes and adjusts strategy before making the first edit. Filtering by project
-on read means notes from unrelated codebases don't add noise. The data is
-per-tool and per-failure-reason, not aggregate — so the agent knows exactly
-which tool failed and why, not just that something went wrong.
-
----
-
-### G5 — No way to read a function body by name before replacing it
-
-**What all tools do:** To replace a function body without corrupting its
-signature, the LLM must first read the current signature. In all existing
-tools this requires either loading the full file (expensive on large files) or
-using a grep/search tool and then reading the surrounding lines (two tool
-calls, and the LLM still has to identify the function boundaries manually).
-
-**Why it matters:** `replace-function-body` (or equivalent whole-function
-rewrite tools) carry a silent risk: if the LLM reconstructs the signature from
-memory rather than reading it, it can silently change the function's interface.
-The tool has no way to detect this without a prior read.
-
-**What a smart server can do:** Expose a `get-function-body` tool that accepts
-a function name and returns the exact current lines — signature through closing
-brace — using the same brace-matching logic already used for replacement. The
-LLM reads the exact signature in one targeted call, then writes back a
-replacement that is guaranteed to include it. Eliminates the silent-signature-
-change failure class at the cost of one cheap tool call.
-
-**Effort:** Very low in a server that already has brace-matching infrastructure
-— it is the read half of `replace-function-body` exposed as its own tool.
-
----
-
-### G6 — Edit failure rates are never measured across sessions
-
-**What all tools do:** No existing tool measures its own edit success rate in a
-form the LLM can query. Claude Code has opt-in telemetry sent to Anthropic;
-a third-party scraper can compute an aggregate success rate from transcripts
-after the fact. Cline and Cursor have nothing. None of them give the LLM
-access to its own performance data during a session, and none persist it across
-sessions.
-
-**Why it matters:** Without cross-session data, proposal priority is guesswork.
-The priority table in this document (P1 > P2 > P3 > …) is based on reasoning
-about which failure modes are most common — but real usage data might show that
-`partialMatch` is far rarer than `whitespace`, or that `apply_patch` fails at
-five times the rate of `str_replace`. That would immediately reprioritise
-which mitigations to build.
-
-**What a smart server can do:** When the LLM resets the session stats counter,
-append the completed session's report (with a timestamp) to a JSON file on
-disk before zeroing. Over weeks of normal use this builds a dataset that ranks
-failure modes by observed frequency, validates whether implemented mitigations
-actually reduced their target fail class, and surfaces regressions when a code
-change makes things worse. No external tooling required — the data collection
-is inside the server and the LLM can query the history directly.
+`apply-patch` is best kept for human-provided patches or cases where the LLM is applying
+a diff received from an external source (e.g. a git diff), not generating one itself.

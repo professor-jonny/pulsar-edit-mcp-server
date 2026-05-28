@@ -111,14 +111,14 @@ Always loaded. Cannot be disabled.
 | `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed |
 | `get-selection` | Return the currently selected text and its line/column range |
 | `get-context-around` | Return lines around the N-th match of a query — useful for targeted edits |
-| `find-text` | Find all positions of a string or regex in the active editor |
+| `find-text` | Find positions of a string or regex in the active editor. Supports `contextLines` and `occurrence:N`. Each result has `{ line, text, before?, after? }` |
 
 ### File Operations
 
 | Tool | Description |
 |---|---|
 | `read-file` | Read any project file with 1-based line numbers. Reads from the live buffer if the file is open in Pulsar, otherwise from disk |
-| `read-lines` | Read a specific line range from any file (cheaper than read-file for large files). Buffer-first when the file is open in Pulsar |
+| `read-lines` | Read lines from any file. Supports hint-based resolution: `functionHint` (extract a named function body), `afterHint` (lines after an anchor string), `betweenHint` (lines between two anchors), `centerLine`+`radius` (window around a line), `lineHint` (alias for centerLine). `startLine`/`endLine` still work when exact line numbers are known. Buffer-first when the file is open in Pulsar |
 | `create-file` | Create a new file and open it in the editor |
 | `move-file` | Move or rename a file. Open tab is retargeted in-place via `buffer.setPath()` — undo history preserved |
 | `copy-file` | Copy a file to a new path and open the copy in a new tab. If the source is open with unsaved edits, the copy reflects the live buffer content |
@@ -141,15 +141,14 @@ Always loaded. Cannot be disabled.
 | `goto-line` | Jump the cursor to a specific line (and optional column) |
 | `list-open-files` | List all files currently open in editor tabs |
 | `get-active-editor-info` | Quick metadata check on the active editor without loading the full document: filename, line count, cursor position, language, modified status |
-| `get-surrounding-context` | Return lines around a target line without loading the whole file |
 
 ### Search
 
 | Tool | Description |
 |---|---|
-| `grep-file` | Search a file for a pattern and return matching lines. Buffer-first when the file is open in Pulsar |
-| `grep-project` | Search all project files for a pattern. Buffer-first for open files — unsaved edits are always reflected |
-| `search-symbol` | Find all uses of a C symbol with whole-word matching. Buffer-first for open files |
+| `grep-file` | Search a file for a pattern and return matching lines. Supports `contextLines` (N lines before/after each match) and `occurrence:N` (return only the Nth match). Buffer-first when the file is open in Pulsar |
+| `grep-project` | Search all project files for a pattern. Supports `contextLines` and `occurrence:N`. Buffer-first for open files — unsaved edits are always reflected |
+| `search-symbol` | Find all uses of a C symbol with whole-word matching. Supports `contextLines` and `occurrence:N`. Buffer-first for open files |
 
 > Grep tools use a cross-platform implementation so they work consistently on Windows and Unix. All three tools (`grep-file`, `grep-project`, `search-symbol`) read from the live buffer when a file is open in Pulsar, so unsaved edits are always visible without saving first.
 
@@ -226,7 +225,14 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 
 ### smart failure responses
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
-- After 3 consecutive failures on the same tool, the response suggests switching to a more appropriate alternative (e.g. `replace-function-body` or `replace-document`)
+- The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency
+- After 2 consecutive failures, the response escalates with tool-switch suggestions
+- On a **successful** `str_replace` with no hints on a file >300 lines, a nudge is appended telling you which hints to use next time — closing the loop before problems start
+
+### ambiguity guard
+- Before committing, `str_replace` counts **all** occurrences of `old_str` in the file. If more than one match exists and no scope hint is set, the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing every matching line number and the hints to use. Prevents the most dangerous silent failure mode: replacing the wrong occurrence without any warning
+- The same guard applies to `replace-block` (checks the anchor string), `replace-function-body` (checks the function name as a definition-like pattern), and `delete-block` (checks `startContent`)
+- Passing `occurrence:N` where N > 1 disables the guard — you are already being deliberate about multiples
 
 ### partial match feedback
 When a tool fails partway through, it returns structured context so the LLM can correct and retry in one step rather than making a separate read call:

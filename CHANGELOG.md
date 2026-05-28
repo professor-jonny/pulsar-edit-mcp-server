@@ -1,5 +1,70 @@
 
 
+## 0.6.0
+
+### New search/read capabilities — `contextLines` + `occurrence` on grep tools
+
+All three grep/search tools now support scoped result narrowing on par with the edit tools:
+
+- **`grep-file`** — added `contextLines` (returns N lines before/after each match as `before`/`after` arrays) and `occurrence:N` (return only the Nth match and stop). Matches `grep-project` parity.
+- **`grep-project`** — `contextLines` and `occurrence` were already implemented; confirmed complete.
+- **`search-symbol`** — added `contextLines` and `occurrence` with the same pattern (globalIndex counter, early-exit labeled break, before/after arrays). Updated description.
+- **`find-text`** — upgraded from `buffer.findAllSync` to a line-scan approach. Added `contextLines` and `occurrence`. Each result now has `{ line, text, before?, after? }` consistent with grep-file output. Added try/catch for invalid regex (was missing).
+
+### `read-lines` full rewrite — hint-based range resolution
+
+`read-lines` no longer requires `startLine`/`endLine`. All parameters are now optional. New resolution modes:
+
+- **`centerLine` + `radius`** — return a window of N lines around a centre line
+- **`functionHint`** — scan for a named function, brace-count to find its body, return it
+- **`afterHint`** — return lines starting after the first occurrence of an anchor string
+- **`betweenHint: { start, end }`** — return lines between two anchor strings
+- **`lineHint`** — alias for `centerLine` (radius defaults to 10)
+
+`startLine`/`endLine` still work as before for callers that know exact line numbers.
+
+### `delete-line-range` schema fix — hints were silently ignored
+
+**Bug fix:** `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented in its handler but none of them were declared in `inputSchema`. The LLM could never pass them — they were silently dropped. Fixed by spreading `ANCHOR_SCHEMA` into the inputSchema and making `startLine`/`endLine` optional (required only when no hint is provided).
+
+### `get-surrounding-context` removed
+
+Fully superseded by the `read-lines` rewrite. All call sites updated. Removed from `editStats`, `buildReport()`, `getEditStats()`, `resetEditStats()`, `tools[]` list, and `list-tools` handler.
+
+### Edit stats UI — dynamic tool list
+
+`showEditStats()` (Pulsar UI panel) previously used a hardcoded 14-entry `tools = [...]` array that was stale (included the removed `get-surrounding-context`, omitted `find_text`, `delete_block`, `sed`). Replaced with dynamic derivation from `Object.keys(editStats.session)` — the panel now always reflects the live tool set automatically.
+
+### Smart failure suggestion engine — fires on first failure, not third
+
+Replaced `failureSuggestion()` with `smartSuggestion(ctx)` + `successNudge(ctx)`:
+
+- **`smartSuggestion`** fires on **failure #1** (not #3). Detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds urgency. Escalates at consecutive failure **#2** (not #3).
+- **`successNudge`** appended to `str_replace` success responses when no hints were used on a file >300 lines — tells you which hints you should have used, and if `old_str` looks like a function body, specifically says to use `replace-function-body` next time.
+- Feedback fires at the **moment of failure in the tool response** — the only reliable way to change in-context behaviour.
+
+### Ambiguity guard — blocks silent wrong-occurrence edits
+
+`str_replace` now counts all occurrences of `effectiveOldStr` in the full file before committing. If `totalMatches > 1` and no scope hint is set (no `functionHint`/`afterHint`/`betweenHint`/`lineHint` and `occurrence <= 1`), the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing all line numbers where it matches and the specific hints to use. Scan capped at 20 matches for performance.
+
+Previously `str_replace` with an ambiguous `old_str` would silently replace occurrence 1 — the most dangerous silent failure mode.
+
+`noScopeHint = false` when `occurrence > 1` (caller is already being deliberate about multiples).
+
+### Ambiguity guard extended to `replace-block`, `replace-function-body`, `delete-block`
+
+A shared `ambiguityCheck({needle, fullText, noScopeHint, toolName, isCodeFile})` helper now guards:
+
+- **`replace-block`** — checks anchor string before brace-matching
+- **`replace-function-body`** — checks function name via regex scan (`name\s*\(`) counting only definition-like occurrences, not call sites
+- **`delete-block`** — checks `startContent` before deleting
+
+### Bug fixes — search tool stats tracking
+
+- **`find-text` missing `bump()`** — `find-text` had no `editStats` entry and never called `bump()` on hit or miss. Added `find_text` to the stats initializer, `buildReport()`, `getEditStats()` (session + lifetime), and `resetEditStats()`. Added `bump('find_text', 'hits')` and `bump('find_text', 'fails', 'noMatch')` in the handler.
+
+---
+
 ## 0.5.0
 
 ### Bug fixes — buffer integrity
