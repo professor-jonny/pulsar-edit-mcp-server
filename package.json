@@ -2,7 +2,6 @@
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
   "version": "0.3.00",
-  "type": "module",
   "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
   "keywords": ["mcp", "llm", "ai", "pulsar", "editor"],
   "activationHooks": [
@@ -12,7 +11,10 @@
     "atom-workspace": [
       "pulsar-edit-mcp-server:listen",
       "pulsar-edit-mcp-server:restart",
-      "pulsar-edit-mcp-server:disable-group"
+      "pulsar-edit-mcp-server:disable-group",
+      "pulsar-edit-mcp-server:emergency-revert",
+        "pulsar-edit-mcp-server:save-backup",
+        "pulsar-edit-mcp-server:show-edit-stats"
     ]
   },
   "repository": "https://github.com/professor-jonny/pulsar-edit-mcp-server",
@@ -29,11 +31,6 @@
     "linter-indie": {
       "versions": {
         "2.0.0": "consumeLinter"
-      }
-    },
-    "linter": {
-      "versions": {
-        "2.0.0": "consumeLinterMessages"
       }
     }
   },
