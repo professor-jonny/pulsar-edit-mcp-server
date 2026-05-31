@@ -33,6 +33,10 @@ If you work on LLM tooling, MCP servers, or agentic coding assistants, it's wort
 
 <img src="https://github.com/user-attachments/assets/5e796c45-c0e8-4e15-a9db-1b5dcb27057d" width="700" />
 
+**Stats panel:**
+
+<img src="https://github.com/professor-jonny/pulsar-edit-mcp-server/blob/main/assets/stats.jpg" width="700" />
+
 ---
 
 ## Installation
@@ -100,7 +104,7 @@ Always loaded. Cannot be disabled.
 
 | Tool | Description |
 |---|---|
-| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. Supports multi-line matches, `functionHint` (scope to named function), `lineHint` (start at line), `afterHint` (start after content string), `betweenHint` (scope between two anchors), `occurrence:N` (replace Nth match), `fuzzyWhitespace` (match ignoring indentation differences), and `dryRun` to preview before committing. Tracks consecutive failures and surfaces a tool-switch suggestion after 3 misses |
+| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. **Always use a hint on files >100 lines.** Decision ladder: (1) know the function name? → `functionHint` — scopes to that function body, safest for JS/C; (2) unique string just before the edit? → `afterHint`; (3) inside a block (switch/struct/#ifdef)? → `betweenHint:{start,end}`; (4) have a line number from grep? → `lineHint`; (5) same pattern N times? → `occurrence:N`. `fuzzyWhitespace:true` when indentation mismatches cause failures. `dryRun:true` to preview multi-line matches before committing |
 | `replace-all` | Replace ALL occurrences of a string or regex in the active editor. Supports `dryRun` to preview match count and locations before writing |
 | `replace-document` | Replace the entire editor contents |
 | `replace-function-body` | Atomically replace a named function's full signature and body in one operation — avoids line-number shifting. Supports `dryRun` |
@@ -108,7 +112,7 @@ Always loaded. Cannot be disabled.
 | `delete-line-range` | Delete a range of lines (inclusive). Supports `dryRun`. **Warning:** line numbers shift after every delete |
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
-| `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed |
+| `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed. Supports `occurrence:N` to target the Nth match of `startContent`. Tracks hintsUsed in stats |
 | `get-selection` | Return the currently selected text and its line/column range |
 | `get-context-around` | Return lines around the N-th match of a query — useful for targeted edits |
 | `find-text` | Find positions of a string or regex in the active editor. Supports `contextLines` and `occurrence:N`. Each result has `{ line, text, before?, after? }` |
@@ -130,7 +134,7 @@ Always loaded. Cannot be disabled.
 | `list-project-functions` | List every function definition across all project files |
 | `get-includes-and-defines` | Return all `#include` and `#define` lines from a C/C++ file. Buffer-first when the file is open in Pulsar |
 | `apply-patch` | Apply a unified diff patch to the active editor buffer. Context-anchored — survives line number drift. Supports `dryRun`. Tracks failure count and advises strategy switch after 3 failures |
-| `replace-across-files` | Find and replace across all project files (supports dry-run). Open files updated via buffer (undo preserved); closed files written to disk |
+| `replace-across-files` | Find and replace across all project files. **Safe workflow:** first call without `confirm` returns a match listing with line numbers and `contextLines` surrounding context (default 2) — review what will change. Then call again with `confirm:true` to commit. `maxMatches` cap (default 50) blocks unsafe mass edits and forces narrowing with `glob`. Open files updated via buffer (undo preserved); closed files written to disk |
 | `run-command` | Execute a shell command and return stdout, stderr, and exit code |
 
 ### Navigation
@@ -167,17 +171,20 @@ Always loaded. Cannot be disabled.
 
 | Tool | Description |
 |---|---|
-| `get-diagnostics` | Syntax-check the active C/C++ file using gcc/clang/cl |
+| `get-diagnostics` | Return live linter diagnostics (errors, warnings, info) from linter-bundle. **Live on buffer — no save needed** (re-runs ~300ms after every buffer change). Works for any language with a linter provider installed. `scope:'file'` (default) or `scope:'project'`. Returns `[]` gracefully if linter-bundle is not active |
+| `get-compiler-diagnostics` | Syntax-check the active C/C++ file using the compiler directly (gcc / clang / cl). Always call `save-file` first — runs against the saved file on disk. `scope:'file'` (default) or `scope:'project'`. Useful when you need authoritative compiler errors rather than linter output |
 
-> Note: Diagnostics run against the saved file on disk, not the live buffer. Always call `save-file` first. The Pulsar linter service API is not compatible with Electron 3, so `get-diagnostics` invokes the compiler directly (gcc / clang / cl) rather than consuming linter provider messages. The linter consumer hooks are present in the source for a future upgrade path.
+> For most workflows use `get-diagnostics` — it's live, language-agnostic, and requires no save. Use `get-compiler-diagnostics` when you specifically need the compiler's output (e.g. after a `save-file` at the end of a C/C++ edit sequence).
 
 ### Debugging
 
 | Tool | Description |
 |---|---|
 | `get-debug-log` | Return recent MCP tool call log entries. Supports `tail` (default 20, max 100), `filter` by keyword, and `clear` to wipe the buffer |
-| `get-edit-stats` | Return per-tool edit statistics for the current session: hits, fail reasons, hint usage, dry-run count, fuzzy whitespace commits, and average `old_str` length. Pass `reset:true` to zero all counters after reading |
+| `get-diagnostics` | Return live linter diagnostics from linter-bundle (errors, warnings, info). **Live on buffer — no save needed.** `scope: 'file'` (default) returns messages for the active editor; `scope: 'project'` returns all messages across open files. Works for any language with a linter provider installed (JS, TS, C, C++, and others). Returns `[]` gracefully if linter-bundle is not active |
+| `get-edit-stats` | Return per-tool edit statistics for the current session and lifetime totals (persisted in `edit-stats.json`). Covers all edit tools and all search tools (`grep-file`, `grep-project`, `search-symbol`, `find-text`, `replace-across-files`). SESSION: counters since last restart. LIFETIME: cumulative across all sessions. Tracks hits, fail reasons, hint usage (including `occurrence`/`contextLines` for search tools), dry-run count, fuzzy whitespace commits, and average `old_str` length. Pass `reset:true` to flush session into lifetime and zero session counters |
 | `session-notes` | Persistent cross-session notes written by the LLM. `action:write` appends a note (what failed, what fix worked, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Notes survive server restarts and are stored in `session-notes.json` in the package root |
+| `checkpatch` | Run kernel-style whitespace and formatting checks against a C/C++ file. Pass `filePath` to audit any project file, or omit to audit the active editor buffer (live, no save required). Results grouped by rule sorted by frequency, capped at 20 per rule. Returns a clean confirmation when no violations found. Non-.c/.h files are silently skipped. Useful for auditing the full-file style state before or after a series of LLM edits. Stats tracked in `get-edit-stats` (`checkpatchRuns` + `checkpatchViolations`) |
 
 ### Highlight
 
@@ -223,6 +230,10 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 - the tools have failure counters and if triggered will alert thee llm that maybe the choice of tooling is not correct or they are using it wrong
 - this is to steer LLMs to use the correct tool for the job.
 
+### tool description decision ladders
+
+All tool descriptions have been rewritten to lead with **decision triggers** — concrete "when to use this" rules rather than feature lists. Each hint (`functionHint`, `afterHint`, `betweenHint`, `lineHint`, `occurrence`) now has an explicit trigger condition so the LLM reaches for the right hint at the right moment, not just after a failure.
+
 ### smart failure responses
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
 - The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency
@@ -230,9 +241,36 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 - On a **successful** `str_replace` with no hints on a file >300 lines, a nudge is appended telling you which hints to use next time — closing the loop before problems start
 
 ### ambiguity guard
+
 - Before committing, `str_replace` counts **all** occurrences of `old_str` in the file. If more than one match exists and no scope hint is set, the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing every matching line number and the hints to use. Prevents the most dangerous silent failure mode: replacing the wrong occurrence without any warning
 - The same guard applies to `replace-block` (checks the anchor string), `replace-function-body` (checks the function name as a definition-like pattern), and `delete-block` (checks `startContent`)
 - Passing `occurrence:N` where N > 1 disables the guard — you are already being deliberate about multiples
+
+### `lint: true` — inline linter feedback
+
+- Pass `lint: true` to any edit tool (`str_replace`, `replace-function-body`, `replace-block`, `insert`, `delete-line-range`, `delete-block`, `apply-patch`, `replace-all`, `sed`) to have the response automatically append a scoped linter snapshot after the edit — no separate `get-diagnostics` call needed
+- Scope: rows touched by the edit (insert/replace: inserted range ±5; delete: deletion point ±5 lines). `apply-patch`, `replace-all`, and `sed` use whole-file scope — they touch arbitrary locations
+- Errors + warnings only. Silent when clean. Silent when linter-bundle is not active (safe on all project types)
+- Opt-in by design: passing `lint: true` only when you want the feedback keeps output clean otherwise
+
+### style checking — automatic per-edit and on-demand
+
+Two complementary mechanisms keep C/C++ file style clean across a session:
+
+**Automatic inline style check (always on for `.c`/`.h` files)**
+Every edit tool (`str_replace`, `insert`, `replace-function-body`, `replace-block`, `delete-line-range`, `delete-block`, `apply-patch`) automatically runs the style checker against the lines it added or changed — **only the new or modified lines, never the pre-existing file content**. If violations are introduced, a `🎨 style` suffix is appended to the tool's success response listing the rule and affected lines — no opt-in needed. The per-edit results are accumulated in `get-edit-stats` under `styleChecks` (`editsChecked`, `totalViolations`, `cleanEdits`, `byRule`). This catches regressions at the point they are introduced.
+
+> **Important:** inline stats count only violations in lines your edits wrote. Pre-existing violations already in the file when you opened it do not affect these counters at all — a file with 50 pre-existing style errors will show zero inline violations until you touch those lines. Use `checkpatch` for the full-file baseline before starting work; the two together give a complete picture: `checkpatch` shows what was already wrong, inline stats show what you introduced.
+>
+> The two counter sets are **completely isolated** in `get-edit-stats` — `checkpatchRuns` and `checkpatchViolations` are separate fields from `editsChecked` and `totalViolations`. There is no way for a `checkpatch` run to inflate the inline violation count or vice versa. If you see `checkpatchRuns: 0` it simply means `checkpatch` has not been called this session, not that the file is clean.
+
+**`checkpatch` — whole-file audit on demand**
+Call `checkpatch` (no arguments) or `checkpatch({ filePath: "..." })` to audit the entire file in one pass. Results are grouped by rule sorted by frequency, capped at 20 violations per rule. Use this:
+- At the start of a session to understand the style baseline of a file before editing
+- After a series of edits to verify the file is still clean end-to-end
+- When `fuzzyWhitespace` starts behaving unexpectedly — mixed whitespace in a file makes per-line substitution ambiguous; a clean uniform file is a pre-condition for reliable content-anchored matching
+
+**Why uniformity matters for editing:** `fuzzyWhitespace:true` matches content ignoring indentation then commits using the buffer's actual whitespace. This works reliably when the whole file uses one consistent style — the substitution is predictable. In a mixed file (some lines tabs, some spaces), the same anchor pattern can have different real whitespace at different occurrence sites, making the substitution ambiguous. Running `checkpatch` and fixing violations before a major edit sequence restores the uniformity that makes `fuzzyWhitespace` dependable.
 
 ### partial match feedback
 When a tool fails partway through, it returns structured context so the LLM can correct and retry in one step rather than making a separate read call:
@@ -288,13 +326,14 @@ Check the counters are at zero. If they are not, a previous session was interrup
 
 #### While you are working
 
-- If `str_replace` fails twice in a row, call `get-edit-stats()` before trying again. The failure class (`whitespace`, `partialMatch`, `outOfScope`) tells you what to fix — do not retry blindly with the same call.
+- If `str_replace` fails twice in a row, call `get-edit-stats()` before trying again. The failure class (`whitespace`, `partialMatch`, `outOfScope`, `ambiguous`) tells you what to fix — do not retry blindly with the same call.
 - Use `afterHint` or `functionHint` on any `str_replace` where the pattern could appear more than once in the file.
 - If whitespace failures are showing up in stats, switch to `fuzzyWhitespace: true` for the rest of the session on that file.
+- Pass `lint: true` on any edit where you want immediate feedback on errors introduced by the change — eliminates a separate `get-diagnostics` call.
 
 #### When the session ends
 
-Call `get-edit-stats()` to read the summary, then write a note before you close:
+Call `get-edit-stats({ reset: true })` — this reads the summary, flushes session counters into the lifetime totals in `edit-stats.json`, and zeroes the session counters for next time. Then write a note:
 
 ```
 session-notes({ action: "write", project: "<project-name>", note: "..." })
