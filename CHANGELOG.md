@@ -1,3 +1,65 @@
+## 0.9.3
+
+### Maintainability
+
+- Promoted `summarise`, `buildReport`, and `buildStyleReport` from inner closures inside the `get-edit-stats` MCP handler to module-scope functions. `getEditStats()` now delegates to these shared helpers instead of duplicating ~115 lines of arithmetic. Single source of truth for all stats formatting.
+
+---
+
+## 0.9.2
+
+### Maintainability
+
+- Extracted `maybeLintSuffix(lint, editor, startRow, endRow)` async helper in `mcp-registration.js`. Replaces 13 identical inline IIFE patterns (`lint ? await (async () => { ... })() : ""`) across str_replace, insert, delete-line-range, delete-block, replace-block, replace-function-body, replace-all, sed, and apply-patch handlers.
+
+---
+
+## 0.9.1
+
+### Maintainability
+
+- Extracted `CODE_FILE_RE` constant and `isCodeFilePath(p)` helper in `mcp-registration.js`. Replaces 20 identical inline `/\.(js|ts|jsx|tsx|c|cpp|h|cs|py|java|go|rs)$/i.test(...)` expressions spread across the file — extension list now maintained in one place.
+
+---
+
+## 0.9.0
+
+### Code review — bug fixes and reliability improvements
+
+Full line-by-line review of `mcp-registration.js`. All red and yellow items resolved.
+
+**Bugs fixed:**
+
+- **`smartSuggestion` broken for `delete-block`** — all four failure paths were passing `toolName: "delete-line-range"` and incrementing `deleteFailures` (shared with `delete-line-range`). Added a separate `deleteBlockFailures` counter, fixed all failure sites to pass `toolName: "delete-block"`, added a `"delete-block"` branch to the no-hints nudge section, and added `"delete-block"` to the tool-switch escalation map. `delete-block` failures now give specific, actionable guidance instead of silently suggesting the wrong tool.
+
+- **`bump('find_text', 'fails', 'noMatch')` wrong call signature** — third argument was treated as `n` (increment value), not a sub-key. `find_text` miss counts were never incremented. Fixed to `bump('find_text', 'fails.noMatch')` at both call sites.
+
+- **Unconditional hint bumps in `delete-block`** — `hintsUsed.preprocBlock`, `hintsUsed.functionHint`, and `hintsUsed.occurrence` were bumped unconditionally in both the structural-anchor and content-anchor paths regardless of whether those hints were actually provided. All three are now guarded (`if (preprocBlock)`, `if (functionHint)`, `if (occurrence > 1)`). Also added a missing `hintsUsed.startContent` bump in the content-anchor path.
+
+**Reliability fixes:**
+
+- **`lintSnapshot` view mode leak on throw** — `lbUiPanel.viewMode` was mutated before `lbTool.execute()` with no `finally` guard. If `execute()` threw, the panel was left in `"file"` mode permanently. Wrapped in `try/finally`.
+
+- **`import` statement out of order** — `import { CompositeDisposable, Disposable } from "atom"` was stranded after `const IS_WINDOWS` and `function getShell()` declarations. Moved to the top import block.
+
+- **`delete-line-range` schema had unused `filePath` param** — accepted in `inputSchema` but never destructured or used by the handler. Removed from schema to avoid misleading callers.
+
+- **`_failureSuggestion` dead shim removed** — legacy wrapper around `smartSuggestion`, underscore-prefixed, never called. Deleted.
+
+- **`_ANCHOR_DESC` dead constant removed** — planned refactor that was never completed. Deleted.
+
+- **`curTool` shadow in `checkpatch` handler removed** — inner declaration duplicated the outer value. Deleted the inner one.
+
+- **`getShell()` `flag` was discarded and hardcoded inline** — `getShell()` returned `{ shell, flag }` but only `shell` was destructured; the spawn call hardcoded `'-Command'`/`'-c'` directly. Now destructures `{ shell, flag }` and uses `flag` in `spawnArgs`.
+
+- **Duplicate comment removed** — exact duplicate of the "Flush lifetime stats" comment above the `process.on('exit')` handler.
+
+**Code clarity:**
+
+- **`bump()` comment corrected** — comment incorrectly stated lifetime stats are synced on every direct `editStats` write. Corrected to accurately describe when sync actually occurs: every 5s via `setInterval`, on every `get-edit-stats` call, on flush events (`beforeunload`/`deactivate`), and on `process.exit`/SIGTERM/SIGHUP.
+
+- **`findFunctionInBuffer` brace scanner limitation documented** — added inline comment noting the character-level scan does not skip string literals, comments, or regex — a `{` inside these can give a wrong `endRow`. Low frequency in practice but `functionHint` scoping in `str_replace` depends on this being correct.
+
 ## 0.8.9
 
 ### Stats zeroing on hot-reload — fixed

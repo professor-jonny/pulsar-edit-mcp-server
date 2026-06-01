@@ -110,7 +110,7 @@ Always loaded. Cannot be disabled.
 | `replace-document` | Replace the entire editor contents |
 | `replace-function-body` | Atomically replace a named function's full signature and body in one operation — avoids line-number shifting. Supports `dryRun` |
 | `insert` | Insert one or more lines. Use `afterContent` or `beforeContent` (content-anchored, immune to line drift) instead of `insert_line` wherever possible. Supports `functionHint`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
-| `delete-line-range` | Delete a range of lines (inclusive). Supports `dryRun`. **Warning:** line numbers shift after every delete |
+| `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `functionHint`, `betweenHint`, `afterHint`, `lineHint`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
 | `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed. Supports `occurrence:N` to target the Nth match of `startContent`. Tracks hintsUsed in stats |
@@ -248,7 +248,7 @@ All tool descriptions have been rewritten to lead with **decision triggers** —
 
 ### smart failure responses
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
-- The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency
+- The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency. `delete-block` failures have dedicated guidance listing `startContent/endContent`, `sectionHint`, `preprocBlock`, `functionHint`, and `get-structural-anchors`
 - After 2 consecutive failures, the response escalates with tool-switch suggestions
 - On a **successful** `str_replace` with no hints on a file >300 lines, a nudge is appended telling you which hints to use next time — closing the loop before problems start
 
