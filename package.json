@@ -1,7 +1,7 @@
 {
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
-  "version": "0.7.6",
+  "version": "0.8.9",
   "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
   "keywords": ["mcp", "llm", "ai", "pulsar", "editor"],
   "activationHooks": [
@@ -70,12 +70,19 @@
       "description": "The API key for authenticating requests when using the built-in chat",
       "order": 3
     },
+    "maxTokens": {
+      "type": "integer",
+      "default": 4096,
+      "minimum": 256,
+      "title": "Max Tokens (built-in chat)",
+      "description": "Maximum tokens the built-in chat LLM can return per response. Raise if responses get cut off.",
+      "order": 4
+    },
     "autoStart": {
       "type": "boolean",
       "default": false,
       "title": "Auto-Start MCP Server on Pulsar Launch",
-      "description": "Automatically start the MCP server when Pulsar opens. If the server fails to start on boot, use Packages > MCP Server > Restart Server from the menu instead.",
-      "order": 4
+      "order": 5
     },
     "showChatPanel": {
       "type": "boolean",
@@ -87,7 +94,7 @@
     "toolGroups": {
       "type": "object",
       "title": "Tool Groups (disable unused groups to save tokens)",
-      "order": 6,
+      "order": 7,
       "properties": {
         "edit": {
           "type": "boolean",

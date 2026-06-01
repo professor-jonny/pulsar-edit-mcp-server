@@ -1,4 +1,229 @@
+## 0.8.9
 
+### Stats zeroing on hot-reload — fixed
+
+**Root cause:** `loadMcpModules()` hot-reloads `mcp-registration.js` on every new MCP session (each time Claude Desktop reconnects). The new module instance calls `loadLifetimeStats()` which reads from disk. But the 5-second flush interval from the *old* instance hadn't fired yet, so any stats accumulated since the last flush were in memory only — lost the moment the new instance loaded fresh from disk.
+
+**Fix:** `loadMcpModules()` now calls `mcpDeactivate()` before the `import()` call. `mcpDeactivate` is the `deactivate()` export from `mcp-registration.js` — it does `syncToLifetime()` + synchronous `writeFileSync` to disk. This guarantees the old instance's in-session counts are persisted before the new instance reads from disk. `mcpDeactivate` is `null` on the very first load (no previous instance), guarded accordingly.
+
+## 0.8.8
+
+### `run-command` — chat panel output fix + `showOutput` control
+
+**Bug fixed:** `chatPanelRef` was `null` after a Pulsar workspace restore. The panel opener only fires when `atom.workspace.open()` creates a new instance — on warm boot Pulsar restores the panel silently without calling the opener, so `chatPanelRef` stayed `null` and all streaming was swallowed. Fix: after the `open()` call in `activate()`, scan `atom.workspace.getPaneItems()` for an existing `ChatPanel` instance and assign it to `chatPanelRef` if found.
+
+**`showOutput` param added to `run-command`:** Controls whether stdout/stderr streams live to the chat panel (default `true`). Set `showOutput: false` for noisy diagnostic commands (long file listings, verbose build output) where you only want the final result returned to the LLM, not the panel flooded. Spawn errors always show regardless of `showOutput`.
+
+**Stray `console.log` removed** from run-command handler.
+
+## 0.8.7
+
+### `get-repo-map` — `excludeGlob` filter added
+
+Added `excludeGlob` parameter to `get-repo-map`, matching the filtering pattern used by `replace-across-files`, `grep-project`, and other tools. Applied after `glob` to exclude files/folders from the symbol walk — e.g. `excludeGlob: 'test/**'` or `excludeGlob: '**/*.test.js'`. Uses the existing `globToRegex` helper; no new infrastructure needed.
+
+## 0.8.6
+
+### `get-repo-map` — full Aider-equivalent rewrite
+
+Replaced the v0.8.5 regex+ref-count implementation with a full Aider-style repo map:
+
+**Symbol extraction:** Tree-sitter via Pulsar's WASM layer (`editor.getBuffer().getLanguageMode().rootLanguageLayer`) for any file currently open in an editor tab. Falls back to regex for closed files. Tree-sitter captures `@definition.*` + `@name` pairs from the language's `tags.scm` query — gives accurate full signatures including return type and parameters.
+
+**PageRank ranking:** Builds a directed file→file reference graph weighted by `sqrt(ref_count)`. Runs 20-iteration power-iteration PageRank with optional personalisation via `mentionedFiles` parameter (50× boost for mentioned files). Distributes file rank across its symbols proportional to each symbol's reference share.
+
+**TreeContext rendering:** Groups symbols by file, sorted by file PageRank descending. Within each file, sorts by line number. Renders actual source signature lines with `│` prefix and `⋮...` ellipsis between non-consecutive lines — same format as Aider's `grep-ast` TreeContext.
+
+**Token budget:** `maxTokens` parameter (default 1024 ≈ 4096 chars at ~4 chars/token). Binary search on symbols-per-file cap to find the maximum content that fits in budget.
+
+**Parameter changes:** `maxSymbols` → `maxTokens`; `mentionedFiles` array added. `includeLineNumbers` and `minRefs` unchanged.
+
+**Requires full restart + babel cache clear** (inputSchema changed).
+
+---
+
+## 0.8.5
+
+### `get-repo-map` — compressed codebase symbol index
+
+New tool in the SEARCH group. Returns a compact plain-text tree of all function symbols across the project, grouped by file, sorted by cross-file reference count. Designed as a first-call orientation tool for unfamiliar codebases — fits the whole project structure in ~1000 tokens.
+
+**Output format:**
+```
+src/hal.c
+  hal_read()               L45   ← 8 refs
+  hal_write()              L78   ← 3 refs
+  hal_init()               L12
+```
+
+**Parameters:** `glob` (default `**/*.{c,cpp,h,hpp,js,ts,jsx,tsx}`), `maxSymbols` (default 150), `minRefs` (default 0), `includeLineNumbers` (default true).
+
+**Algorithm:** walks all project files, extracts function symbols with a C/JS-aware regex, counts cross-file word-boundary references for each symbol, ranks by ref count, truncates to `maxSymbols`, renders as grouped plain-text tree sorted by file ref weight.
+
+Stats wired into session and lifetime `get-edit-stats` reporting under `get_repo_map`.
+
+---
+
+## 0.8.4
+
+### Chat panel — copy/paste support + streaming fixes
+
+**Missing `appendOutput` / `appendFault` methods**
+`chat-panel.js` was missing both methods called by `mcp-registration.js` — run-command streaming output and tool fault visibility were silently no-ops. Added both methods following the `showError` pattern.
+
+**Multiline chunk display**
+stdout/stderr chunks arriving as multi-line blocks were displayed as one blob. Fixed to split on `\n` and append each line as a separate div so output is always line-per-line regardless of how PowerShell batches output.
+
+**Text selection and copy**
+Chat panel output was not selectable (mouse drag or Ctrl+C). Root cause: Pulsar's `settings-view` class sets `user-select: none` on the panel root. Fixed by adding `user-select: text` and `-webkit-user-select: text` to both `.chat-panel` and `#chat-display` in the LESS file.
+
+**Right-click context menu — output area**
+Right-click showed only Pulsar pane split options. Fixed by registering `atom.contextMenu.add()` scoped to `.chat-panel #chat-display` with Copy and Select All items, backed by `atom.commands.add()` using `execCommand('copy')` and `window.getSelection()`.
+
+**Right-click context menu + paste — input textarea**
+Paste (Ctrl+V and right-click) was not working in the chat input box. Added `user-select: text` and `-webkit-user-select: text` to `#chat-input` in LESS, and extended the context menu to cover `.chat-panel #chat-input` with Cut, Copy, Paste, and Select All items.
+
+**Misc cleanup**
+Removed dead `static mcpClient`/`static llmModel` fields (caused ESLint parse error), removed `console.log` from `setMcpClient()`, re-applied `setModel: _setModel` unused-var rename.
+
+---
+
+## 0.8.3
+
+### `chat-functions.js` bug fixes + dead import removal
+
+**`clearContextHistory` bug**
+
+`clearContextHistory()` was zeroing the array with `length = 0`, wiping the system prompt alongside the conversation history. Fixed to reset to `[{role: "system", content: systemPrompt}]` so the system prompt is always preserved. Also clears the `mcpTools` cache so the tool list re-fetches cleanly on the next LLM call.
+
+**`max_tokens` hardcoded at 1000**
+
+`callLLM()` had `max_tokens: 1000` hardcoded — too low for most coding responses. Now reads `atom.config.get('pulsar-edit-mcp-server.maxTokens') || 4096`. Added `maxTokens` to `package.json` configSchema (integer, default 4096, min 256) so it is user-configurable from Settings.
+
+**Tool call visibility in chat panel**
+
+Each MCP tool call now shows `🔧 \`tool-name\`` in the chat panel before the call is dispatched. Uses the existing `updateChatHistory()` method — no new UI code needed.
+
+**Dead `style-checker` import removed**
+
+`mcp-registration.js` had a stale `import { checkLines as styleCheckLines, formatViolations as styleFormatViolations, isKernelFile } from './style-checker'` at line 7. The file `style-checker.js` does not exist at that path, causing `ERR_MODULE_NOT_FOUND` on load and silently preventing all tools from registering (only ghidra-tools.js, loaded separately, was working). None of the three imported symbols were used anywhere in the file. Import removed.
+
+---
+
+## 0.8.2
+
+### `restartServer` hang fix + ghidra-tools console.log cleanup
+
+**`restartServer` hang (root cause of "only ghidra tools loading")**
+
+`restartServer()` was deadlocking on `await new Promise(resolve => this.serverInstance.close(resolve))` — the built-in MCP client keeps a persistent keep-alive connection open, so `server.close()` never resolves. This meant `startMcpClient()` never ran, no new MCP session was initialized, and `loadMcpModules()` never fired. The ghidra tool `console.log` calls fire at module parse time (not registration time), so they appeared in the console even when registration never happened — making it look like only ghidra tools were loading when in fact nothing was registering.
+
+Fix: close all active transports first, then use `Promise.race(server.close(), 500ms timeout)` + `server.closeAllConnections?.()` so `restartServer()` never hangs regardless of open connections.
+
+**ghidra-tools.js console.log cleanup**
+
+Removed 6x `console.log("Registering Tool: " + curTool)` lines — same noise removed from `mcp-registration.js` in 0.7.x. `replace-all` confirmed 6 matches, committed in one operation.
+
+---
+
+## 0.8.1
+
+### Chat panel — tool fault visibility, destructive command confirmation, drag-and-drop, show panel command
+
+**Tool fault visibility**
+
+Every MCP tool error now appears in the chat panel as a red `⚠ tool-name: message` block, so failures are visible to the developer in real time rather than silently disappearing into the LLM context.
+
+- `mcp-registration.js`: thin `wrapHandler` closure patched onto `server.registerTool` at the top of `mcpRegistration()`. All tool handler throws are intercepted, `chatPanel.appendFault(name, err.message)` is called, then the error is re-thrown so the MCP SDK still returns an error response to the LLM. Zero changes to individual tool handlers.
+- `chat-panel.js`: `appendFault(toolName, message)` method added — dark red box with amber left border, same append/autoscroll pattern as `appendOutput`.
+
+**Destructive command confirmation**
+
+`run-command` now pauses and shows a **Run / Cancel** widget in the chat panel before executing any command matching a destructive pattern (`rm`, `rmdir`, `del`, `rd`, `format`, `Remove-Item`, `ri`, `rd /s`). The MCP response is held in a Promise until the user clicks.
+
+- `confirm: boolean` parameter added to `run-command` inputSchema — pass `confirm:true` to bypass the UI for LLM-driven automation flows.
+- If the chat panel is not open, destructive commands are blocked outright and return a JSON error rather than running silently.
+- `styles/pulsar-edit-mcp-server.less`: `.chat-command-confirm` class (amber left border, dark amber background) + `.chat-command-fault` (dark red).
+
+**Drag-and-drop path inserter**
+
+Drop a file from the filesystem onto the chat textarea → the file's path is inserted at the cursor position. File contents are never read — the LLM uses `read-file` or `grep-file` as needed, keeping the context window lean.
+
+- `chat-panel.js`: `dragover` + `drop` listeners on the textarea. Uses `event.dataTransfer.files[n].path` and inserts at `selectionStart`.
+
+**Show Chat Panel command**
+
+Reopens the chat panel at any time without restarting Pulsar. Previously the only way to get it back was to restart with the `showChatPanel` setting enabled.
+
+- `pulsar-edit-mcp-server.js`: `pulsar-edit-mcp-server:show-chat-panel` command calls `atom.workspace.open('atom://pulsar-edit-mcp-server/chat')`. Pulsar's opener deduplicates — returns the existing panel if alive, creates a new one if closed.
+- `menus/pulsar-edit-mcp-server.json`: **Packages → MCP Server → Show Chat Panel** and right-click context menu entry added.
+
+---
+
+## 0.8.0
+
+### `run-command` — live output streaming to chat panel
+
+`run-command` now streams stdout and stderr to the built-in chat panel in real time as the process runs, rather than buffering all output until the process exits.
+
+- `chat-panel.js`: added `appendOutput(text, type)` method. Creates a `div` with CSS classes `chat-command-output` + `chat-command-{type}` (types: `stdout`, `stderr`, `info`, `exit`), appends to `#chat-display`, and autoscrolls. The command line itself is shown as an `info` entry (`$ command`) before execution starts.
+- `mcp-registration.js`: `spawn` added to `child_process` imports. `mcpRegistration()` gains a fifth parameter `chatPanel = null`. The `run-command` handler replaces the previous `exec`-based implementation with `child_process.spawn` — `stdout` and `stderr` data events stream chunks to `chatPanel.appendOutput()` live and accumulate into full buffers. Process close resolves the MCP response with the same shape as before (stdout, stderr, exitCode). Timeout handled via `setTimeout` + `proc.kill()`. A `run_command` entry (`hits`, `fails.spawnError`) is added to `editStats`.
+- `pulsar-edit-mcp-server.js`: `chatPanelRef` module-level variable added (same pattern as `linterRegistry`) and set alongside `this.chatPanel = new ChatPanel()`. The `autoStart` block now checks `atom.packages.hasActivatedInitialPackages()` first so warm-boot timing is handled correctly — if initial packages have already activated, `restartServer()` is called immediately rather than registering a callback that will never fire.
+
+All `chatPanel` calls in the handler are guarded with `if (chatPanel)` — safe when the panel is not open.
+
+**Boot fix:** `await atom.workspace.open()` in `activate()` delayed execution past `onDidActivateInitialPackages`, so `restartServer()` was never called on a warm boot. Fixed by checking `hasActivatedInitialPackages()` first. `getUserValue` (not a real Pulsar API) replaced with `getSchema(key).default` comparison.
+
+---
+
+## 0.7.9
+
+### Stats pause/resume — UI toggle
+
+Added a **⏸ Pause Stats / ▶ Resume Stats** toggle to the Edit Stats panel. When paused, `bump()` is a no-op so tool hits and fails are not recorded — useful when working on Ghidra pseudocode or other non-standard files where failures would skew hit-rate stats.
+
+- `mcp-registration.js`: `let statsPaused = false` module-level flag; `bump()` returns early when set; `getEditStats()` response includes `paused: true/false`; `toggleStatsPause()` exported for the UI.
+- `pulsar-edit-mcp-server.js`: Stats panel gets a yellow **⏸ STATS PAUSED** banner and a Pause/Resume button that updates reactively without reopening the panel. No new MCP tools — UI-only.
+
+### Lint cleanup
+
+Resolved all ESLint warnings and errors across the open file set:
+
+- **`mcp-registration.js`**: `5_000` numeric separator → `5000` (parse error — ESLint ecmaVersion does not support ES2021 numeric separators). Nine unused variables prefixed `_`: `ANCHOR_DESC`, `failureSuggestion`, `searchTo`, `flag` (destructure rename), `pattern` (regex validate-only block in replace-across-files), `hintLabel`, `fnRe`, `diffHunks`, `lineNo`.
+- **`pulsar-edit-mcp-server.js`**: Removed unused `import { z } from "zod"`. Added missing `import * as Diff from "diff"` (used in `saveBaseline()` but was never imported). Removed dead `isServerSourceFile()` function — defined but never called.
+- **`style-checker.js`**: `lastNonEmpty` → `_lastNonEmpty` (computed but never read).
+- **`chat-panel.js`**: Removed `static mcpClient = null` and `static llmModel = null` class field declarations — ES2022 syntax unsupported by the ESLint config, and both were dead (`mcpClient` is an instance property set via `setMcpClient()`, `llmModel` was never read anywhere). Renamed unused `setModel` destructure import to `setModel: _setModel`.
+
+---
+
+## 0.7.8
+
+### Bug fixes — code cleanup
+
+- **`pulsar-edit-mcp-server.js`**: Removed dead `import { randomUUID } from "crypto"` (unused — `createUUID()` uses a manual implementation). Moved misplaced `import path`, `import fs`, and `import ChatPanel` from after `loadMcpModules()` back into the static imports block at the top of the file. Removed duplicate `this.subscriptions.dispose()` call in `deactivate()` — the guard block at lines 311–313 was a redundant second dispose after the unconditional call at line 304.
+
+- **`mcp-registration.js`**: Removed stray `console.log(entry)` left in the `dbg()` helper. Removed stray `console.log('[style-check] _totalCHEdits=...')` from the inline style-check path. Removed 58 `console.log("Registering Tool: ...")` calls that fired on every MCP server reload. Converted `const { ... } = require('./style-checker')` to a proper ESM `import` — the only `require()` in a file that otherwise uses `import` throughout.
+
+---
+
+## 0.7.7
+
+### `style-checker.js` — `singleline_if` rule added
+
+Added `singleline_if` (CHECK severity) to detect control-flow bodies on the same line as their keyword — e.g. `if (!g_hal) return -1;`. Linux kernel style requires the body on its own line even for single-statement guards. The rule fires on `if`, `else`, `for`, and `while` and is detected without a full parser by matching lines where the token after the closing `)` is not `{` or a comment.
+
+The rule is tracked in `styleStats` / `lifetimeStyleStats` alongside all other per-rule counters. The reset loop is self-maintaining (`Object.keys`) so no reset block changes were needed.
+
+### `test/hal.c` — rewritten to correct Linux kernel style
+
+The test file was originally written with two kernel style violations:
+
+- **Doxygen-style file header** (`@file` / `@brief`) — kernel code uses plain `/* */` block comments, not Doxygen.
+- **Single-line `if` bodies** — all guard returns were written as `if (!g_hal || ...) return -1;` on one line. Kernel style requires the body on the next line.
+
+Both corrected. `checkpatch` confirms zero violations.
+
+---
 
 ## 0.7.6
 
@@ -19,7 +244,96 @@ When an LLM edits a C file, it may introduce whitespace inconsistencies — mixi
 
 **Stats integration:** `checkpatch` runs are tracked in `styleStats` alongside inline edit checks. `get-edit-stats` now returns `checkpatchRuns` and `checkpatchViolations` in the `styleChecks` section, and the `sessionStyleSummary` string includes both inline and checkpatch totals.
 
-### Bug fixes — `isCodeFile` TDZ crash in `str_replace`
+### `style-checker.js` — major rewrite aligned to Linux kernel coding standard
+
+Complete rewrite of `style-checker.js` to properly implement Linux kernel coding style
+rules as defined in `Documentation/process/coding-style.rst` and enforced by
+`checkpatch.pl`. The checker is advisory — it reports violations for the LLM to decide
+on, never auto-corrects.
+
+**Key design changes:**
+
+- **Severity levels** added to every violation: `ERROR` (must fix), `WARNING` (should fix),
+  `CHECK` (informational). Matches checkpatch.pl's three-tier system. `formatViolations()`
+  now groups output by severity.
+
+- **`sanitiseLine()` helper** — replaces string literal contents, char literals, `/* */`
+  block comment bodies, and `//` line comment tails with placeholder characters before
+  running spacing checks. Eliminates false positives on content inside strings/comments.
+  Block comment state tracked across lines via `inBlockComment`.
+
+- **`wrong_indentation` fixed** — previous version fired on any leading spaces including
+  hal.c's consistent 4-space style. Now correctly implements the kernel rule: leading
+  spaces on a code line are an ERROR. Skips block comment interiors, `*` continuation
+  lines, and `#` preprocessor lines.
+
+- **`single_line_comment` downgraded** to `CHECK` — checkpatch.pl now sets
+  `$allow_c99_comments = 1` by default, meaning `//` comments are tolerated.
+  Previously reported as a full violation.
+
+- **New rules added:**
+  - `dos_line_endings` (ERROR, whole-file) — `\r\n` line endings
+  - `trailing_blank_lines` (ERROR, whole-file) — blank lines at end of file
+  - `open_brace_control` (WARNING) — replaces old `brace_placement`; `{` on own line
+    after control flow keyword should be on same line (K&R)
+  - `open_brace_function` (WARNING) — function `{` on same line as signature should be
+    on its own line (Allman for functions)
+  - `else_brace_placement` (WARNING) — `else` on separate line from `}` should be
+    `} else {`
+  - `space_before_open_brace` (WARNING) — `if(x){` missing space before `{`
+
+- **`brace_placement` kept** in stats shape for backwards compatibility with existing
+  lifetime data on disk.
+
+- **Reset loop** for style stats is now self-maintaining — iterates `Object.keys(styleStats)`
+  instead of a hardcoded list, so adding new rules never requires updating the reset block.
+
+**Rules deliberately omitted** (too ambiguous, kernel-specific, or require a parser):
+typedef/struct naming, Signed-off-by signoffs, deprecated kernel APIs, spelling,
+`#include` ordering, `do {} while (0)` macro wrapping, braces-required-for-multi-line-if,
+complex operator spacing beyond plain `=`.
+
+
+
+`checkLines` in `style-checker.js` was firing `missing_newline_eof` on every inline edit
+check because `new_str` snippets virtually never end with `\n` — they're code fragments, not
+complete files. This rule was polluting every edit's style report and inflating the lifetime
+`missing_newline_eof` violation count (confirmed: fired on all 5 lifetime inline checks).
+
+**Fix:** Added `isWholeFile = false` parameter to `checkLines`. The EOF check is now gated
+on `isWholeFile`. The `checkpatch` tool passes `true` (it audits a complete file). All edit
+tools call through `applyStyleCheck` which passes nothing (defaults to `false`). No change
+needed at the `applyStyleCheck` call sites — the default handles it transparently.
+
+### `replace-all` — inline style check wired
+
+`replace-all` now runs `applyStyleCheck(replacement, filePath)` after committing changes,
+matching the behaviour of all other edit tools. Previously a `replace-all` across a `.c`/`.h`
+file gave no style feedback regardless of what the replacement text contained. The `🎨 style`
+suffix now appears on the success response if the replacement introduces violations, and the
+results are accumulated in `get-edit-stats` `styleChecks` counters.
+
+### `list-project-functions` / `list-functions` / `get-function-list-with-comments` — keyword false positives fixed
+
+All three function-listing tools shared a `fnRe` regex that matched any line of the form
+`identifier(` — including C control-flow keywords `if (`, `for (`, `while (`, `switch (`.
+This caused spurious entries like `{ name: "if", signature: "if (!g_hal || ...) {" }` in
+results. Fixed by adding a negative lookahead `(?!if|for|while|switch|return|else|do\b)`
+immediately before the capture group in all three regex instances (lines 1113, 3523, 3651).
+
+### Bug fix — `apply-patch` fuzzy rescue `allLines is not defined` crash
+
+The fuzzy rescue failure paths in `apply-patch` (both the "could not parse hunks" early
+exit and the "fuzzy rescue failed" final failure) called `smartSuggestion()` with
+`fileLines: allLines.length`. `allLines` is declared in the `sed` handler's scope and
+is not available in the `apply-patch` handler, which uses `bufLines` for the same data.
+This caused a runtime ReferenceError on any patch that triggered the fuzzy rescue path,
+swallowing the proper failure message and returning a raw JS exception string instead.
+
+**Fix:** Both `allLines.length` references at lines 4713 and 4812 replaced with
+`bufLines.length`. Discovered during full tool sweep in 0.7.6 testing session.
+
+
 
 The `const isCodeFile` declaration was placed at line ~1386 (inside the match-found path) but was referenced at line ~1374 in the `smartSuggestion` call on the no-match/failure path. JavaScript `const` temporal dead zone (TDZ) caused a runtime crash "Cannot access 'isCodeFile' before initialization" that silently swallowed the ambiguity guard — the guard fired but the error handler crashed before returning the AMBIGUOUS MATCH response.
 

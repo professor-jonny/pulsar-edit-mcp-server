@@ -60,6 +60,7 @@ A **`MCP:On`** tile appears in the bottom-left status bar when the server is run
 | API Key | _(empty)_ | API key for the built-in chat |
 | Auto-Start MCP Server | `false` | Start the server automatically when Pulsar opens |
 | Show Chat Panel | `true` | Open the built-in chat panel on launch |
+| Max Tokens | `4096` | Maximum tokens for built-in chat LLM responses |
 | Tool Groups | all enabled | Enable/disable individual tool groups to control token usage |
 
 ### External client configuration
@@ -135,7 +136,7 @@ Always loaded. Cannot be disabled.
 | `get-includes-and-defines` | Return all `#include` and `#define` lines from a C/C++ file. Buffer-first when the file is open in Pulsar |
 | `apply-patch` | Apply a unified diff patch to the active editor buffer. Context-anchored — survives line number drift. Supports `dryRun`. Tracks failure count and advises strategy switch after 3 failures |
 | `replace-across-files` | Find and replace across all project files. **Safe workflow:** first call without `confirm` returns a match listing with line numbers and `contextLines` surrounding context (default 2) — review what will change. Then call again with `confirm:true` to commit. `maxMatches` cap (default 50) blocks unsafe mass edits and forces narrowing with `glob`. Open files updated via buffer (undo preserved); closed files written to disk |
-| `run-command` | Execute a shell command and return stdout, stderr, and exit code |
+| `run-command` | Execute a shell command and return stdout, stderr, and exit code. Stdout and stderr stream live to the built-in chat panel as the process runs |
 
 ### Navigation
 
@@ -153,6 +154,7 @@ Always loaded. Cannot be disabled.
 | `grep-file` | Search a file for a pattern and return matching lines. Supports `contextLines` (N lines before/after each match) and `occurrence:N` (return only the Nth match). Buffer-first when the file is open in Pulsar |
 | `grep-project` | Search all project files for a pattern. Supports `contextLines` and `occurrence:N`. Buffer-first for open files — unsaved edits are always reflected |
 | `search-symbol` | Find all uses of a C symbol with whole-word matching. Supports `contextLines` and `occurrence:N`. Buffer-first for open files |
+| `get-repo-map` | Aider-style compressed codebase index. Extracts symbols via tree-sitter (open editors) or regex fallback, ranks files by PageRank, renders with `│` signature lines and `⋮...` ellipsis between gaps. Output fits within a token budget. Use as the first call on an unfamiliar project. Params: `glob`, `excludeGlob` (exclude folders/files e.g. `**/.mcp-baseline/**`), `maxTokens` (default 1024), `minRefs`, `mentionedFiles` (PageRank boost), `includeLineNumbers` |
 
 > Grep tools use a cross-platform implementation so they work consistently on Windows and Unix. All three tools (`grep-file`, `grep-project`, `search-symbol`) read from the live buffer when a file is open in Pulsar, so unsaved edits are always visible without saving first.
 
@@ -225,6 +227,16 @@ Ghidra's decompiler output is pseudocode — it does not guarantee the exported 
 - The **Auto-Start** setting starts the MCP server automatically when Pulsar launches. If it fails to start on boot, use **Packages → MCP Server → Restart Server** from the menu.
 - Tool groups disabled in Settings take effect after the LLM client reconnects. Re-enabling a group is instant and does not require a reconnect or Pulsar restart.
 - The built-in chat panel can be hidden via **Settings → Show Chat Panel** if you prefer an external client.
+
+### Chat panel
+
+The built-in chat panel serves two roles: an LLM chat interface (when an API key is configured) and a live output display for MCP tool activity from external clients such as Claude.ai.
+
+**Output display** — `run-command` stdout and stderr stream into the panel line-by-line as the process runs. Tool faults (unexpected handler throws) appear as ⚠ fault lines. Destructive commands (`rm`, `Remove-Item`, etc.) show a Run/Cancel confirmation widget before executing.
+
+**Copy and paste** — text in the output area is selectable by mouse drag or Ctrl+A/Ctrl+C. Right-click on the output area shows Copy and Select All. Right-click on the input box shows Cut, Copy, Paste, and Select All. Note: image clipboard content (e.g. print screen) cannot be pasted into the text input — text only.
+
+**Opening the panel** — use **Packages → MCP Server → Show Chat Panel** or the command palette (`pulsar-edit-mcp-server:show-chat-panel`).
 
 ### tool metrics
 - the tools have failure counters and if triggered will alert thee llm that maybe the choice of tooling is not correct or they are using it wrong

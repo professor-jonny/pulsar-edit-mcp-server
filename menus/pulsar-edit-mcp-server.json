@@ -18,6 +18,10 @@
         "command": "pulsar-edit-mcp-server:save-backup"
       },
       {
+        "label": "MCP: Show Chat Panel",
+        "command": "pulsar-edit-mcp-server:show-chat-panel"
+      },
+      {
         "label": "MCP: Show Edit Stats...",
         "command": "pulsar-edit-mcp-server:show-edit-stats"
       }
@@ -49,6 +53,10 @@
             {
               "label": "Save Backup...",
               "command": "pulsar-edit-mcp-server:save-backup"
+            },
+            {
+              "label": "Show Chat Panel",
+              "command": "pulsar-edit-mcp-server:show-chat-panel"
             },
             {
               "label": "Show Edit Stats...",

@@ -1088,3 +1088,67 @@ in the `styleChecks` object and includes both in the `sessionStyleSummary` strin
 `"inline: N edits checked ... | checkpatch: N run(s), N violations found"`. This allows
 direct comparison: if checkpatch violations are consistently higher than inline violations
 introduced, the file was already dirty when the session started and needs a cleanup pass.
+
+---
+
+### S9 — `singleline_if` rule: catching LLM-generated kernel style violations
+
+**Problem being solved:** LLMs trained on mixed codebases produce syntactically valid C that nonetheless violates Linux kernel coding style in consistent, predictable ways. Two patterns observed directly during development:
+
+1. **Single-line `if` bodies:** `if (!g_hal) return -1;` — kernel style requires the body on the next line even for single-statement guards. LLMs produce this habitually because it is common in non-kernel C.
+
+2. **Doxygen-style file headers:** `@file` / `@brief` tags are standard Doxygen but not kernel style. Kernel code uses plain `/* */` block comments.
+
+Neither is caught by the compiler or linter. Both pass all mechanical whitespace checks. They are pattern-choice violations, not formatting accidents.
+
+**Why this is a distinct failure class:** Tabs-vs-spaces is a formatting accident — the pattern is right but the whitespace is wrong. A single-line `if` body is a wrong pattern chosen habitually. The LLM reaches for it because training data is dominated by application C where it is accepted. Prompt-level instructions help but are forgotten mid-session; a rule that fires at the point of introduction is more reliable.
+
+**Strategy implemented:** A `singleline_if` CHECK rule was added to `style-checker.js`. It detects `if`/`else`/`for`/`while` followed by `)` and a non-brace statement token on the same line, without a full parser. Fires on inline per-edit check and on `checkpatch` whole-file audit. Severity CHECK (not WARNING) because a small number of kernel subsystems permit the form in specific macro contexts — the LLM is informed but not blocked.
+
+**Stats tracking:** `singleline_if` is tracked in `styleStats` / `lifetimeStyleStats` via the self-maintaining `Object.keys` reset loop. The `introduced` counter over sessions will show whether the rule is reducing the frequency — if it remains high, session notes should push harder on the convention at the start of kernel C sessions.
+
+**The broader pattern:** Any LLM doing kernel or embedded C work will produce this violation class. The full mitigation stack is: (a) `singleline_if` rule catches it at introduction time, (b) `checkpatch` at session start reveals the pre-existing baseline, (c) session notes record codebase-specific style conventions so the LLM reads them before writing the first line.
+
+---
+
+### S10 — `str_replace` fails silently on backtick-heavy markdown lines
+
+**What happened:** Attempting to append content to the end of `LLM-FAILURE-MODES.md` using `str_replace` with `old_str` containing inline code spans (backtick-wrapped text like `` `"inline: N edits checked ..."` ``) failed with no match, even though the line was visually correct in context. Two consecutive attempts failed.
+
+**Root cause:** The `old_str` passed to `str_replace` contained backtick characters that interacted with the tool's internal string handling or the Zod schema's string parsing, causing the effective search string to differ from what was intended. The line existed in the file but the match never fired.
+
+**Fix:** Switch to `insert` with `afterContent` anchored to a nearby plain-text line that contains no backticks or special characters. `insert` with `afterContent` does a simple substring search and is not affected by the same escaping issues.
+
+**Rule:** When `str_replace` fails on a markdown line that contains inline code spans, do not retry with the same `old_str`. Switch immediately to `insert` with a plain-text `afterContent` anchor from a surrounding line, or use `insert_line` with a line number from `grep-file`.
+
+---
+
+### S11 — `insert` at true end-of-file times out on large files
+
+**What happened:** Calling `insert({ insert_line: 1091, new_str: "..." })` on a 1091-line file (inserting at the last line) caused the MCP server to time out after 4 minutes with no result.
+
+**Root cause:** `insert_line` at EOF on a very large file triggers an edge case in the buffer insertion path — likely the line-count validation or the surrounding-context scan hits a performance cliff when the target line equals the file length. The server did not crash; it simply never returned.
+
+**Fix:** Use `afterContent` anchored to a unique string near the end of the file rather than `insert_line` at EOF. The content-anchored path does not have the same performance issue. For a file where the last meaningful line is unique, `afterContent` on that line is both faster and more robust.
+
+**Rule:** Never use `insert_line: N` where N equals or approaches the file's line count on files >500 lines. Always use `afterContent` with a unique anchor near the target location instead.
+
+---
+
+### S12 — `get-repo-map`: solving context starvation on large multi-file projects
+
+**Problem being solved:** At the start of a session on an unfamiliar or large codebase, the LLM has no map of what exists where. The instinct is to call `read-file` on the most likely file — but on a 6500-line file like `mcp-registration.js` that consumes most of the context window before any editing begins. Alternatively, the LLM guesses function names and file locations, leading to `grep-project` misses and repeated orientation calls.
+
+**Why the existing tools were insufficient:** `list-project-functions` lists every function across all files but returns too much raw data — no ranking, no sense of which functions are architecturally important vs utility helpers. `grep-project` requires knowing what to search for. Neither gives a prioritised overview in a fixed token budget.
+
+**Strategy implemented:** `get-repo-map` produces an Aider-style compressed codebase index that fits within a configurable token budget (default 1024 tokens). It works in three stages:
+
+1. **Symbol extraction** — tree-sitter via Pulsar's WASM layer for any file open in an editor tab (accurate full signatures); regex fallback for closed files.
+2. **PageRank ranking** — builds a directed file→file reference graph weighted by `sqrt(ref_count)`. Runs 20-iteration power-iteration PageRank with optional `mentionedFiles` personalisation (50× boost for files the LLM is currently working on). The most cross-referenced, architecturally central symbols float to the top.
+3. **Token-budget rendering** — binary search finds the maximum number of symbols that fit within the budget. Output uses `│` prefix per symbol and `⋮...` ellipsis between non-consecutive lines, exactly matching Aider's TreeContext format.
+
+**Why this belongs in the tool layer:** The LLM cannot self-correct context starvation — it cannot know what it doesn't know. A tool that automatically surfaces the most important symbols ranked by actual cross-file reference density solves orientation at the infrastructure level. The `mentionedFiles` boost means the map re-centres itself around the current working area as a session progresses.
+
+**`excludeGlob` — preventing shadow-copy pollution:** Projects with baseline or backup directories (e.g. `.mcp-baseline/`) contain copies of the same files. Without filtering, `get-repo-map` would double every symbol and PageRank would be meaningless. The `excludeGlob` param (e.g. `excludeGlob: "**/.mcp-baseline/**"`) applies after the include `glob` filter using the same `globToRegex` helper used by every other project-wide tool, giving consistent behaviour across the tool suite.
+
+**Rule:** Call `get-repo-map` with `excludeGlob` set for any project that has backup or vendor directories before beginning work on an unfamiliar session. Pass the files currently being edited as `mentionedFiles` to re-rank around the current context.
