@@ -109,7 +109,7 @@ Always loaded. Cannot be disabled.
 | `replace-all` | Replace ALL occurrences of a string or regex in the active editor. Supports `dryRun` to preview match count and locations before writing |
 | `replace-document` | Replace the entire editor contents |
 | `replace-function-body` | Atomically replace a named function's full signature and body in one operation — avoids line-number shifting. Supports `dryRun` |
-| `insert` | Insert one or more lines. Use `afterContent` or `beforeContent` (content-anchored, immune to line drift) instead of `insert_line` wherever possible. Supports `functionHint`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
+| `insert` | Insert one or more lines. Use `endOfFile:true` to append at end of file (simplest). Use `afterContent`/`beforeContent` (content-anchored, immune to line drift) for mid-file inserts. Supports `functionEnd`, `functionHint`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
 | `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `functionHint`, `betweenHint`, `afterHint`, `lineHint`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
@@ -146,6 +146,10 @@ Always loaded. Cannot be disabled.
 | `goto-line` | Jump the cursor to a specific line (and optional column) |
 | `list-open-files` | List all files currently open in editor tabs |
 | `get-active-editor-info` | Quick metadata check on the active editor without loading the full document: filename, line count, cursor position, language, modified status |
+| `close-file` | Close an editor tab by path. Optional `save: boolean` (default `false`) saves before closing |
+| `goto-focus` | Move cursor to one or more positions/selections in the active editor, scrolling the view into focus. Array of `{ startLine, startColumn?, endLine?, endColumn? }` (1-based) |
+| `get-project-paths` | Return the list of root folder paths currently open in the Pulsar project |
+| `add-project-path` | Add an additional root folder to the project without removing existing roots |
 
 ### Search
 
@@ -366,11 +370,12 @@ Notes survive server restarts and build up over time in `session-notes.json` in 
 
 ### Emergency Revert
 
-If the live server is edited during use causing the MCP server to crash the user may run the recover option to restore the server to default
+If the live server is edited during use causing the MCP server to crash, use the recover option to restore the server to a known-good state.
 
 **baseline creation**
-- Once on every first boot of pulsar the server files are copied to the baseline directory.
-- Used as the restore files in the event of a boot failure
+- The baseline is **not automatic** — you must save it manually before making changes.
+- Use **Packages → MCP Server → Save Backup** to snapshot the current server files to `.mcp-baseline/`. Do this whenever the server is in a known-good working state.
+- If no baseline has been saved yet, the Restore button will not be available in the revert modal.
 
 **To restore a backup:**
 - `Ctrl+Alt+Shift+R` — or — right-click the editor → **MCP: Emergency Revert Server File...** — or — **Packages → MCP Server → Emergency Revert Server File...**
@@ -384,6 +389,6 @@ A restore only rewrites the file and restarts the HTTP server. If the package it
 4. Restart the LLM client as some cant handle hot loading of tools.
 
 ### WARNING ###
-> ⚠️ **Security Warning:** `run-command` has unrestricted shell access — any command can be executed. The LLM acts as gatekeeper, similar to Claude Code and Cline, but without per-command confirmation prompts (removed as too obtrusive for hands-off workflows). It is strongly recommended to run Pulsar in a sandboxed or virtualised environment when this tool is enabled.
+> ⚠️ **Security Warning:** `run-command` has unrestricted shell access — any command can be executed. Destructive commands (`rm`, `Remove-Item`, `del`, `format` etc.) show a **Run / Cancel** confirmation widget in the chat panel before executing. Pass `confirm:true` to bypass this for automated workflows. **The confirmation check is pattern-based and not exhaustive** — commands that achieve destructive results indirectly (e.g. `patch`, `git clean -fd`, `robocopy /purge`, output redirection, PowerShell scripts) will not be caught. It is strongly recommended to run Pulsar in a sandboxed or virtualised environment when this tool is enabled.
 
 ---

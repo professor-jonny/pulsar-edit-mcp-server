@@ -1,3 +1,108 @@
+## 0.10.3
+
+### `insert` — `endOfFile` anchor
+
+Added `endOfFile: boolean` parameter to the `insert` tool. When `true`, resolves the insertion point to `buffer.getLineCount()` (after the last line) without requiring a line number or content anchor. The simplest and most reliable way to append content to a file.
+
+- Added as step **(0)** at the top of the decision ladder in the tool description — checked before `functionEnd`, `afterContent`, and `insert_line`.
+- `dryRun:true` supported — shows the last few lines of the file plus the `►` preview lines.
+- `hintsUsed.endOfFile` counter added to `editStats.insert` for tracking.
+- Does **not** shift any existing line numbers (insertion is always at the end).
+
+## 0.10.2
+
+### Stats: faults vs misses now distinct categories
+
+`get-edit-stats` now separates **faults** (tool misused, bad input, precondition not met) from **misses** (tool ran correctly, content just wasn't there) across all summary groups.
+
+**`summarise()` rewritten with four groups:**
+- **Edit** — `editFaults` excludes `replace_all.noMatch` and `sed.noMatch` (moved to `editMisses`). Summary: `N edit ops: H hits (X%), F faults, M misses`.
+- **Search** — unchanged hits/misses; `get_repo_map.noProject` now counted as a search fault.
+- **RE/Ghidra** — new group. `noEditor`/`notFound` → faults; `noMatch` → misses. Summary only appears when RE tools have been used.
+- **Commands** — new group. `spawnError` → fault; `exitNonZero`/`timedOut` → misses. Summary only appears when commands have been run.
+
+**`run_command` handler:** now bumps `misses.exitNonZero` or `misses.timedOut` at the close site alongside the existing `hits` bump. New keys added to `editStats.run_command.misses`.
+
+**`replace_all` handler:** was silently returning on no-match without bumping anything. Now bumps `fails.noMatch` correctly before the early return.
+
+**`buildReport()`:** `replace_all` entry renamed `failTotal` → `missTotal`. `sed` entry split into `faultTotal` (badExpression + addressNotFound) and `missTotal` (noMatch). `reSummary` and `cmdSummary` added to report when non-null.
+
+## 0.10.1
+
+### Ghidra stats now surface in `get-edit-stats` output
+
+All six `ghidra_*` keys (`ghidra_list_functions`, `ghidra_search_functions`, `ghidra_get_function_body`, `ghidra_get_xrefs`, `ghidra_add_comment`, `ghidra_get_function_list_with_comments`) now appear in both the session and lifetime sections of `get-edit-stats`. Previously they were tracked internally via `bump()` but never included in the report output. Also added the missing `lifetimeReport.run_command` entry (it had a session entry but no lifetime counterpart).
+
+## 0.10.0
+
+### Ghidra tools merged into `mcp-registration.js`
+
+All six Ghidra RE tools (`list-functions`, `search-functions`, `get-function-body`, `get-xrefs`, `add-comment`, `get-function-list-with-comments`) have been merged from the separate `ghidra-tools.js` module directly into the main `mcpRegistration()` function as a `// ── GHIDRA GROUP` block. `ghidra-tools.js` is retained as a dead file but is no longer imported or called.
+
+**What changed:**
+- All Ghidra tools now use `bump()` for hit/fail stats — 6 new `ghidra_*` keys in `editStats`/`lifetimeStats`.
+- All `console.log` calls removed from tool handlers.
+- `get-function-body` and `add-comment` now accept `occurrence:N` to disambiguate when a function name appears more than once.
+- `add-comment` now checks `isGhidraFile()` before running the style checker — decompiled pseudocode no longer triggers spurious style violations.
+- `isGhidraFile(filePath, text)` helper added at module scope — detects `.bin.c`/`.xbe.c` filename patterns and high FUN_/DAT_/PTR_ identifier density.
+- `enable-group` for `ghidra` now calls `mcpRegistration()` inline instead of dynamically importing `ghidra-tools.js`.
+- `pulsar-edit-mcp-server.js` no longer imports or calls `ghidraToolsRegistration` — startup registration happens via the normal `mcpRegistration()` call.
+- `TOOL_CATALOGUE` updated with individual entries for all 6 tools replacing the old `ghidra:*` wildcard placeholder.
+
+**Requires:** full Pulsar restart + babel cache clear (module structure changed).
+
+## 0.9.6
+
+### Navigation — four new tools
+
+- **`close-file`** — Close an editor tab by path. Optional `save: boolean` param (default `false`) saves the file before closing. Stats tracked under `close_file`.
+- **`goto-focus`** — Set one or more cursor positions or selections in the active editor, scrolling the view to bring the location into focus. Accepts an array of `{ startLine, startColumn?, endLine?, endColumn? }` objects (1-based). Stats tracked under `goto_focus`.
+- **`get-project-paths`** — Return the list of root folder paths currently open in the Pulsar project via `atom.project.getPaths()`. Stats tracked under `get_project_paths`.
+- **`add-project-path`** — Add an additional root folder to the Pulsar project without removing existing roots. Guards with `fs.existsSync` — returns an error if the path does not exist. Stats tracked under `add_project_path`.
+
+All four keys added to `editStats` and surfaced in `buildReport()` via the `st()` accessor.
+
+### Bug fix — `getMcpTools` null guard (`chat-functions.js`)
+
+`getMcpTools()` crashed with `TypeError: Cannot read properties of undefined (reading 'listTools')` when `mcpClient` was null (server not started or panel opened before MCP server initialised). Fixed: `getMcpTools()` now returns `[]` immediately when `mcpClient` is null. `chat-panel.js` `handleSend()` also guards early and shows a clear error rather than crashing. LLM chat remains functional without tools — `tool_choice: "auto"` with an empty array produces no tool calls.
+
+---
+
+## 0.9.5
+
+### Chat improvements
+
+**Streaming LLM responses (`chat-functions.js`)**
+- `callLLM` now sends `stream: true` and parses the SSE response body via `ReadableStream` + `TextDecoder`.
+- Tokens are appended live into a `.message.assistant.streaming` div — plain text while arriving, then re-rendered through `marked`/`DOMPurify`/`hljs` on finish.
+- Tool-call deltas are accumulated from streamed chunks (`delta.tool_calls[].function.arguments`) and executed exactly as before after the stream closes.
+- `updateChatHistory('Tool', ...)` shows 🔧 tool name before each tool call — carried over from v0.8.3 fix that had been lost.
+
+**Image / vision support (`chat-functions.js` + `chat-panel.js`)**
+- `chatToLLM` accepts a `pendingImages` array; when images are present the user message content becomes a multipart array (`[{type:"text",...}, {type:"image_url",...}]`).
+- `handleSendMessage` accepts and forwards `pendingImages`.
+- `ChatPanel`: paste event on `#chat-input` detects `image/*` clipboard items and attaches them via `_attachImageFile(file)`.
+- Drag-and-drop on `#chat-input` now bifurcates: image files attach as vision inputs, non-image files insert path at cursor (existing behaviour preserved).
+- Image preview strip (`#image-preview-strip`) appears above the textarea showing 64×64 thumbnails; each has an ✕ remove button. Strip clears automatically on send.
+- LESS: `.image-preview-strip`, `.image-preview-item`, `.image-preview-thumb`, `.image-preview-remove`, `.message.assistant.streaming` styles added.
+
+**Also fixed in this pass**
+- `clearContextHistory` now resets to `[{role:"system",...}]` instead of zeroing the array (had reverted to broken state).
+- `max_tokens` now reads `pulsar-edit-mcp-server.maxTokens` config (default 4096) instead of hardcoded 1000 (had also reverted).
+- Removed noisy `console.log` calls from `getMcpTools` and `fetchModels`.
+
+---
+## 0.9.4
+
+### Maintainability
+
+- Added `sumFails(obj)` helper at module scope — replaces 32 inline `Object.values(x.fails).reduce((a,b)=>a+b,0)` expressions across `buildReport`, `summarise`, and the `editFails` sum block. Handles undefined/null gracefully so callers need no inline `||{}` guards.
+- Added `const st = key => stats[key] || {}` inside `buildReport` — replaces all `(stats.foo||{hits:0}).hits` / `(stats.foo||{hintsUsed:{}}).hintsUsed||{}` / `(stats.foo||{dryRuns:0}).dryRuns` guard chains for the 13 optional-key tools.
+- Removed redundant `|| ""` from all 7 `applyStyleCheck(x, editor.getPath() || "")` call sites — `applyStyleCheck` already guards `null` internally.
+- Fixed 9 literal `$1` survivors in `buildReport` left by a prior regex replace-across-files pass that did not expand backreferences.
+
+---
+
 ## 0.9.3
 
 ### Maintainability

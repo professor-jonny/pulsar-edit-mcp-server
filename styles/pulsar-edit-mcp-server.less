@@ -6,6 +6,8 @@
   height: 100%;
   padding: 2%;
   background: @base-background-color;
+  user-select: text;
+  -webkit-user-select: text;   // Electron/WebKit prefix
 }
 
 .top-display {
@@ -48,13 +50,25 @@
 .message         { margin-bottom: .4rem; }
 .message.user    { color: @text-color-info; }
 .message.assistant { color: @text-color-success; }
+.message img     { max-width: 100%; max-height: 200px; object-fit: contain; border-radius: 4px; display: block; margin: 4px 0; cursor: pointer; }
 .message code        { font-family: var(--editor-font-family); background: fade(@text-color-info, 10%); padding: 1px 4px; border-radius: 3px; }
 .message pre code    { display: block; padding: 8px; overflow-x: auto; }
 .message a
 
+#chat-input-container {
+  flex-shrink: 0;          // never compressed — always visible
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+}
+
 #chat-input {
   min-height: 60px;
+  max-height: 120px;       // prevent textarea growing to push send button away
   resize: vertical;
+  user-select: text;
+  -webkit-user-select: text;
   margin: 0;
   color: var(--standard-text-color);
   border-color: @input-border-color;
@@ -76,6 +90,88 @@
   white-space:      pre-wrap;
 }
 
+// run-command streaming output types
+.chat-command-output  { font-family: monospace; font-size: 0.85em; padding: 1px 6px; white-space: pre-wrap; }
+.chat-command-stdout  { color: @text-color; }
+.chat-command-stderr  { color: @text-color-warning; }
+.chat-command-info    { color: @text-color-info; opacity: 0.8; }
+.chat-command-exit    { color: @text-color-subtle; font-style: italic; }
+
+// tool fault — shown when a tool handler throws
+.chat-command-fault {
+  color:            #fff;
+  background-color: #7a1c1c;
+  border-left:      3px solid #e06c75;
+  padding:          4px 8px;
+  margin:           3px 0;
+  font-size:        0.85em;
+  white-space:      pre-wrap;
+}
+
+// destructive command confirmation widget
+.chat-command-confirm {
+  background-color: #4a3000;
+  border-left:      3px solid #e0a030;
+  padding:          6px 10px;
+  margin:           4px 0;
+  border-radius:    3px;
+  font-size:        0.9em;
+  code { background: fade(#e0a030, 20%); padding: 1px 4px; border-radius: 2px; }
+}
+
+// ── image preview strip ───────────────────────────────────────────────────────
+.image-preview-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+  margin-bottom: 4px;
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.image-preview-item {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.image-preview-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 4px;
+  border: 1px solid @base-border-color;
+  object-fit: cover;   // crop to square, no distortion
+  display: block;
+}
+
+.image-preview-remove {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 50%;
+  background: @background-color-error;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  opacity: 0.85;
+  &:hover { opacity: 1; }
+}
+
+// streaming assistant message — plain text while tokens arrive
+.message.assistant.streaming {
+  opacity: 0.75;
+  white-space: pre-wrap;
+  font-style: italic;
+}
+
 .btn-error {
   background-color: #c62828;
   color: #fff;
@@ -91,6 +187,9 @@
   padding: 8px;
   word-break: break-word;
   white-space: normal;   // allow Markdown flow
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 
   .hljs {
     pre code.hljs {
