@@ -1,4 +1,36 @@
+## 0.10.6
+
+### Changed
+- `check-function-docs`: each result entry now includes `signature` (full function definition line) and `inHeader` (bool — true if the function name appears in the corresponding `.h` file). Output report shows `[in header]` tag and `sig:` line per entry. `plainDoc` tier now included in report output.
+- `insert-function-doc`: new optional `line` parameter (1-based, sourced from `check-function-docs` output) used as a direct anchor to the function definition — avoids full-file scan and eliminates ambiguity. Falls back to name scan if omitted.
+- `check-function-docs` handler: auto-loads sidecar `.h` file (same name, `.c` → `.h`) to populate `inHeader` detection.
+
+## 0.10.5
+
+### Changed
+- `naming-checker.js` `buildDocSkeleton`: added `Context: Any context.` section to generated kernel-doc skeletons per official kernel-doc spec; handles variadic `...` params as `@...: Description.` per kernel-doc convention
+- `naming-checker.js`: clarified `/* */` comment accuracy — plain block comments are not a style error but are not extracted by the `kernel-doc` tool; `/**` is required for `EXPORT_SYMBOL` / public non-static functions
+- `check-function-docs` tool description updated to document three severity tiers (missing / wrongStyle / plainDoc) and mention the correct kernel-doc sections
+- `insert-function-doc` tool description updated to list `Context:` and variadic `@...` support
+
+## 0.10.4
+
+### `naming-checker.js` — new module
+
+New `lib/naming-checker.js` implementing three kernel-C naming and doc tools:
+
+- **`namingcheck`** — scans a `.c`/`.h` file for naming violations: function names missing a verb-tier prefix (`get_`, `set_`, `init_`, `handle_`, …), camelCase in function or variable names, `#define` macros not ALL_CAPS. File-scope and local-variable checks, block-comment and preprocessor lines skipped. Reports violations with line/col.
+- **`check-function-docs`** — checks every non-static function has a plain `/* */` block comment above it. Flags missing docs and wrong styles (Doxygen `/**` or `@`-tags, `//` comments).
+- **`insert-function-doc`** — inserts a kernel-style `/* */` doc skeleton above a named function, parsing parameter names from the signature. Aborts if a comment already exists.
+
+All three tools are gated on `isKernelFile()` — non-`.c`/`.h` files get a clear skip message.
+
+Stats wired: `namingcheck`, `check_function_docs`, `insert_function_doc` entries in `editStats`.
+
+---
+
 ## 0.10.3
+
 
 ### `insert` — `endOfFile` anchor
 

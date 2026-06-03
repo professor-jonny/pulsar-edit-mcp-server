@@ -47,132 +47,21 @@ Show before/after diff rendered directly in the chat display after each edit —
 - Collapsible or auto-scrolled
 - Medium complexity
 
-### `naming-checker.js` — function naming + doc template validation
+### ~~`naming-checker.js` — function naming + doc template validation~~ ✅ DONE (v0.10.6)
 
-Ported from GhidraMCP 5.6.0 `NamingConventions` class (pure string logic, no Ghidra dependency). Useful for **any C project**, not just RE work. Sits alongside `checkpatch` — same concept, different layer:
+Implemented as three tools:
 
-- `checkpatch` → code *style* (formatting, spacing, braces)
-- `namingcheck` → code *semantics* (naming quality, doc completeness)
+- **`namingcheck`** — camelCase, verb-segment, macro ALL_CAPS checks. Kernel `.c`/`.h` only.
+- **`check-function-docs`** — three-tier report (missing / wrongStyle / plainDoc). Each entry includes `signature`, `[in header]` tag (sidecar `.h` detection), and `line:` anchor. Kernel `.c`/`.h` only.
+- **`insert-function-doc`** — inserts kernel-doc `/**` skeleton with `@param:`, `Context:`, `Return:`. Accepts `line:` from `check-function-docs` for precise anchor. Kernel `.c`/`.h` only.
 
----
+**Remaining from original spec (deferred):**
+- Multi-style doc support (`doxygen`, `ghidra`, `misra`, `plain`) — currently kernel-only
+- Hungarian prefix enforcement (`g_`, `s_`, `m_` etc.)
+- Tier-3 verb / specifier-token counting
+- `namingcheck.docStyle` config in package.json
+- Weak noun endings check (`Data`, `Info`, `Helper` etc.)
 
-#### Part 1 — `namingcheck` tool: function/variable naming rules
-
-Scans active buffer, reports naming violations with line numbers. Plugs into `styleStats` as new rule types (same counters as checkpatch rules). On-demand only — not wired inline on save.
-
-**Verb tier system** (from `NamingConventions.class` — 100+ verbs total):
-- **Tier 1 — strong/precise:** `Allocate`, `Calculate`, `Clear`, `Close`, `Compare`, `Compress`, `Connect`, `Convert`, `Copy`, `Create`, `Decode`, `Delete`, `Deserialize`, `Destroy`, `Detect`, `Disable`, `Disconnect`, `Dispatch`, `Enable`, `Encrypt`, `Enumerate`, `Execute`, `Find`, `Flush`, `Format`, `Free`, `Generate`, `Get`, `Hash`, `Initialize`, `Insert`, `Load`, `Lock`, `Map`, `Merge`, `Open`, `Parse`, `Print`, `Query`, `Read`, `Register`, `Release`, `Remove`, `Render`, `Reset`, `Resize`, `Resolve`, `Save`, `Search`, `Send`, `Set`, `Sort`, `Start`, `Stop`, `Store`, `Submit`, `Terminate`, `Transmit`, `Unload`, `Unmap`, `Unregister`, `Update`, `Validate`, `Verify`, `Write` — pass with 1+ specifier token.
-- **Tier 2 — acceptable:** `Append`, `Apply`, `Build`, `Check`, `Compute`, `Configure`, `Dump`, `Emit`, `Encode`, `Filter`, `Notify`, `Output`, `Prepare`, `Publish`, `Receive`, `Scan`, `Signal`, `Trigger`, `Watch` — pass with 1+ specifier token.
-- **Tier 3 — vague (need 2+ specifier tokens):** `Do`, `Make`, `Manage`, `Run`, `Use`, `Handle`, `Process`, `Perform`, `Execute` (when used generically) — `ProcessData` FAILS, `ProcessNetworkPacket` PASSES.
-
-**Naming rules:**
-- Function names must start with a tier-1 or tier-2 verb (PascalCase for C++ / snake_case verb prefix for C — configurable)
-- Tier-3 verbs require 2+ additional specifier tokens in the name
-- Minimum name length: 8 chars in the main part (configurable `minNameLength`) — prevents `DoIt`, `GetX`
-- No weak noun endings alone: `Data`, `Info`, `Stuff`, `Thing`, `Item`, `Value`, `Result`, `Helper`, `Util`, `Manager`, `Handler` — must be qualified with a domain word
-- Globals must have `g_` prefix
-- File-scope statics must have `s_` prefix (configurable)
-- Labels must be `snake_case`
-- Enum members must be `UPPERCASE_SNAKE_CASE`
-- Macro names must be `UPPERCASE_SNAKE_CASE`
-
-**Hungarian prefix table** (configurable on/off — off by default, on for RE/Windows work):
-
-| Prefix | Type |
-|--------|------|
-| `p` | pointer |
-| `lp` | long pointer (16-bit legacy) |
-| `pp` | pointer to pointer |
-| `dw` | DWORD (unsigned 32-bit) |
-| `w` | WORD (unsigned 16-bit) |
-| `b` | BOOL or byte |
-| `n` / `i` | int / signed integer |
-| `u` | unsigned int |
-| `sz` | null-terminated string (char[]) |
-| `wsz` | wide null-terminated string (wchar_t[]) |
-| `lpsz` | long pointer to null-terminated string |
-| `lpwsz` | long pointer to wide string |
-| `h` | handle (HANDLE, HWND, HKEY etc.) |
-| `fn` | function pointer |
-| `cb` | count of bytes |
-| `c` / `cch` | count / count of characters |
-| `g_` | global variable |
-| `s_` | static variable |
-| `m_` | member variable (C++ classes) |
-
----
-
-#### Part 2 — `check-function-docs` tool: doc comment validation
-
-Scans buffer for functions missing required doc comment sections. Reports per function with line numbers and which sections are absent. Doc style is selected per-project via config (see UI section below).
-
-**Style: `doxygen`** (default — best general tooling support, VSCode IntelliSense, CLion, Doxygen HTML)
-```c
-/**
- * @brief One-line summary of what the function does.
- *
- * @param[in]  name   Description of input parameter
- * @param[out] result Pointer filled with result on success
- * @return     0 on success, negative errno on failure
- */
-```
-Checks: `@brief` present, `@param` with direction annotation for each parameter, `@return` or `@retval` present.
-
-**Style: `kernel`** (Linux kernel style — pairs with `checkpatch`)
-```c
-/**
- * function_name - one-line summary (no period)
- * @param_name: description of parameter
- *
- * Return: 0 on success, -errno on failure
- */
-```
-Checks: first line is `name - description` format, `@param:` colon-style for each parameter, `Return:` present. Kernel style forbids `@brief` — flagged as violation if present.
-
-**Style: `ghidra`** (RE workflow — plate comment format)
-```c
-/*
- * Algorithm:
- *   Step-by-step description for reverse engineer.
- *
- * Parameters:
- *   param_name (type) [in]  - description
- *
- * Returns:
- *   Description of return value.
- */
-```
-Checks: `Algorithm:`, `Parameters:`, `Returns:` sections present and non-empty.
-
-**Style: `misra`** (safety-critical embedded — strictest)
-Checks: `@brief` + `@details`, `@param` with direction, `@return`, `@pre`/`@post`, `@req` traceability tag.
-
-**Style: `plain`** — just checks a block comment exists above the function. No section validation.
-
----
-
-#### Part 3 — `insert-function-doc` tool
-
-Inserts a skeleton doc comment above a named function, pre-filled with parameter names/types from signature, direction annotations guessed from type, and empty description fields. Style matches active `docStyle` config.
-
----
-
-#### UI — Doc style selector in stats panel
-
-**Doc Style** dropdown in stats panel: `doxygen` | `kernel` | `ghidra` | `misra` | `plain`. Writes `atom.config.set(...)` immediately. **Naming Style** toggle: `General C` (off) | `Windows/RE` (on) for Hungarian enforcement.
-
-#### Configuration (package.json configSchema additions)
-
-- `namingcheck.enabled` — on/off (default `true`)
-- `namingcheck.docStyle` — `doxygen` | `kernel` | `ghidra` | `misra` | `plain` (default `doxygen`)
-- `namingcheck.hungarian` — enforce Hungarian prefixes (default `false`)
-- `namingcheck.staticPrefix` — enforce `s_` prefix on file-scope statics (default `false`)
-- `namingcheck.memberPrefix` — enforce `m_` prefix on C++ members (default `false`)
-- `namingcheck.minNameLength` — minimum function name length (default `8`)
-- `namingcheck.customVerbs` — user-supplied tier-1 verbs array (default `[]`)
-- `namingcheck.requireReqTag` — require `@req` traceability tag (misra only, default `false`)
-
-**Complexity:** Medium. Pure JS, no new dependencies.
 
 ---
 
