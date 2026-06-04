@@ -1,3 +1,39 @@
+## 0.10.22
+
+- **Bug fix: `get-structural-anchors`** — handler was referencing `resolvedPath` and `text` variables that were not declared in its scope. Introduced during the v0.10.20 tree-sitter migration when the function-ends block was updated to call `getSymbols()` but the variable declarations were not updated to match.
+  - Fix: replaced `let buffer` declaration with `let buffer, _gsEditor, _gsText, _gsPath`. Both the `filePath` and active-editor branches now populate all four variables. The `filePath` branch also gained the open-editor lookup needed for tree-sitter to use the live buffer when the target file is already open.
+  - Stale duplicate comment block (`// ── Function ends ──` / `// Use the existing C-function finder...`) cleaned up.
+  - Requires Pulsar restart (handler closures already bound — hot-reload insufficient).
+- **Full tree-sitter tool audit** — all tools verified after v0.10.20–v0.10.21 migration:
+  - `get-structural-anchors` (active editor + `filePath:` variant), `get-function-body`, `search-functions`, `get-function-list-with-comments`, `read-lines` (all hint variants), `str_replace` (functionHint dryRun), `replace-function-body` (dryRun), `insert` (functionEnd dryRun), `get-file-summary`, `checkpatch`, `check-function-docs`, `namingcheck`, `grep-file`, `get-edit-stats`, `get-repo-map` — all pass.
+  - `afterHint` correctly resolves to end of named function (not first char occurrence).
+  - `betweenHint` correctly spans from end of start-function to end of end-function.
+  - No other stale variable references found — full `resolvedPath` scan returns 0 hits post-fix. All `getSymbols()` / `resolveAnchor()` call sites verified to have correct variables in scope.
+
+## 0.10.21
+
+- **naming-checker.js: FN_DEF_RE removed** — last regex-based function detection outside of tree-sitter-symbols.js eliminated.
+  - `checkNaming`: pre-computes `fnByRow` Map via `getSymbolsFromText` at function entry; per-line `FN_DEF_RE` match replaced with O(1) Map lookup.
+  - `checkFunctionDocs`: header sidecar scan replaced with `getSymbolsFromText`; main loop uses same `fnByRow` Map pattern.
+  - `FN_DEF_RE` constant and block comment removed; removed from `module.exports`.
+- **mcp-registration.js: insert-function-doc** — replaced two `FN_DEF_RE_REG` calls (hintLine check + full-scan fallback) with a single `getSymbolsFromText` + `findFunction` call. `FN_DEF_RE` removed from `naming-checker` import.
+- Tree-sitter migration now complete across all files. Only intentional regex remaining: `GHIDRA_FUNC_RE` in mcp-registration.js (decompiled C placeholder names have no grammar support).
+
+## 0.10.20
+
+- **tree-sitter migration complete**: all 6 remaining regex function-matching sites in mcp-registration.js now use `getSymbols`/`getSymbolsFromText`/`findFunction` from `tree-sitter-symbols.js` with regex fallback.
+  - `findFunctionInBuffer`: rewired to `getSymbols` + `findFunction` — fixes `functionHint` scoping for str_replace, insert, sed, delete-block, get-region, read-lines (9 call sites).
+  - `get-function-body`: replaced `ghidraFindFn` + manual brace-walk with `getSymbols` + `findFunction` — correct `endRow` via tree-sitter.
+  - `list-functions` / `search-functions`: replaced `GHIDRA_FUNC_RE` loops with `getSymbols`.
+  - `list-project-functions`: replaced `fnRe` loop with `getSymbolsFromText` — picks up JS/registerTool patterns.
+  - `get-repo-map` regex fallback: replaced inline `cFnRe`/`jsFnRe` loop in `extractSymbols` with `getSymbols`/`getSymbolsFromText` — now includes `REGISTER_TOOL_RE` for closed JS files; open editors use the fixed ancestor-traversal tree-sitter path.
+- Import updated: added `getSymbolsFromText` to require from `./tree-sitter-symbols`.
+- Removed now-unused `cFnRe` and `jsFnRe` local declarations in `get-repo-map`.
+- Removed orphaned old-body fragment after `replace-function-body` on `findFunctionInBuffer` — tree-sitter mis-reported `endRow` on mcp-registration.js due to `export const` ES module syntax in a CommonJS file. Cleaned with `delete-line-range`.
+- `node --check` clean. Hot-reload sufficient (no schema changes).
+
+---
+
 ## 0.10.19
 
 - README: added `## What makes this different` showcase section after `## Why this exists`. Covers ambiguity guard, smart failure suggestions, content-anchored editing, per-tool edit stats, self-updating project memory (session-notes + get-repo-map), `@//` shortcuts, inline C style checking, Ghidra integration, and apply-patch fuzzy rescue. Each feature has a heading, emoji, and competitive callout.

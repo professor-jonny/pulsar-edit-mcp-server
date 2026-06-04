@@ -708,7 +708,7 @@ which tool failed and why, not just that something went wrong.
 
 ---
 
-### G5 — No way to read a function body by name before replacing it
+### G5 — No way to read a function body by name before replacing it ✅ IMPLEMENTED (v0.10.0+)
 
 **What all tools do:** To replace a function body without corrupting its
 signature, the LLM must first read the current signature. In all existing
@@ -809,8 +809,10 @@ matches for performance. `occurrence > 1` disables the guard (caller is delibera
 targeting a specific match).
 
 The same guard was extended to `replace-block`, `replace-function-body`, and
-`delete-block` via a shared `ambiguityCheck()` helper. For `replace-function-body`, a
-regex scan counts definition-like occurrences (`name\s*\(`) only — not call sites.
+`delete-block` via a shared `ambiguityCheck()` helper. For `replace-function-body`,
+`getSymbols()` (tree-sitter backed) counts definition-level occurrences only — not call
+sites. The old `name\s*\(` regex scan was replaced in v0.10.20 as part of the full
+tree-sitter migration.
 
 **Why the guard belongs in the tool, not the prompt:** Prompt instructions like "always
 check for duplicates before editing" are forgotten mid-conversation. Tool-enforced
@@ -894,7 +896,7 @@ N, forms a mental model with line numbers, then by turn N+3 those numbers are wr
 
 **Strategy implemented:** All parameters are now optional. New resolution modes were
 added that anchor by content rather than position:
-- `functionHint` — scan for a named function, brace-count to find its body
+- `functionHint` — resolve the named function via tree-sitter (live buffer) or `getSymbolsFromText` regex fallback (closed files); uses `sym.startRow`/`sym.endRow` directly — no brace-counting needed
 - `afterHint` — lines starting after the first occurrence of an anchor string
 - `betweenHint` — lines between two anchor strings
 - `centerLine`+`radius` — window around a specific line (useful when the line number
@@ -1152,3 +1154,34 @@ Neither is caught by the compiler or linter. Both pass all mechanical whitespace
 **`excludeGlob` — preventing shadow-copy pollution:** Projects with baseline or backup directories (e.g. `.mcp-baseline/`) contain copies of the same files. Without filtering, `get-repo-map` would double every symbol and PageRank would be meaningless. The `excludeGlob` param (e.g. `excludeGlob: "**/.mcp-baseline/**"`) applies after the include `glob` filter using the same `globToRegex` helper used by every other project-wide tool, giving consistent behaviour across the tool suite.
 
 **Rule:** Call `get-repo-map` with `excludeGlob` set for any project that has backup or vendor directories before beginning work on an unfamiliar session. Pass the files currently being edited as `mentionedFiles` to re-rank around the current context.
+
+
+### S13 — Tree-sitter migration: eliminating regex function-matching failures (v0.10.20–v0.10.21)
+
+**Problem being solved:** A large class of `replace-function-body`, `functionHint`, `afterHint`, and `betweenHint` failures traced back to a single root cause — function detection and anchor resolution were built on regex. Several failure modes resulted:
+
+- `replace-function-body` notFound on `registerTool`/arrow-function patterns that the `(?:^|\s)name\s*(` regex never matched
+- `functionHint` scoping finding the wrong occurrence when a function name appeared as both a definition and multiple call sites
+- `afterHint:"fn_name"` resolving to the first *character* occurrence of the string rather than the *end* of the function — causing insert-after-function to land inside the function body
+- `betweenHint` spanning from raw string position to raw string position, not function-to-function semantically
+- `list-functions`, `search-functions`, `get-function-body`, `get-repo-map`, `list-project-functions` all using separate inline regex loops with inconsistent `FN_DEF_RE` definitions
+
+**Strategy implemented (v0.10.20–v0.10.21):** A new `lib/tree-sitter-symbols.js` module was built and all 9 regex-based function-matching sites were migrated to it:
+
+- `getSymbolsFromEditor(editor)` — tree-sitter via `rootLanguageLayer.tree` + `tagsQuery`. Walks `definition.*` + `name` captures. `endRow` from `node.endPosition.row` — exact, no brace-counting.
+- `getSymbolsFromText(text, filePath)` — regex fallback (`C_FN_RE`, `JS_FN_RE`, `REGISTER_TOOL_RE`) for closed files or unsupported grammars. Used by `naming-checker.js` and `list-project-functions`.
+- `findFunction(symbols, name, hints)` — filters by name + `occurrence`/`lineHint`/`afterRow`/`betweenRows` hints. Ambiguity returned as a structured result, not silently resolved.
+- `resolveAnchor(hint, symbols, text)` — three-stage resolution: (1) exact symbol name → `sym.endRow` [symbolEnd], (2) pure integer → lineNumber, (3) `text.indexOf` scan with uniqueness check. Ambiguity fires at both symbol and string level, returns `{row, via, ambiguous?, matches?}`.
+
+**Key behaviour changes visible to the LLM:**
+- `afterHint:"fn_name"` now resolves to the **end** of that function (`sym.endRow`), not the first character occurrence. Insert-after-function semantics are now correct.
+- `betweenHint:{start:"fn_a", end:"fn_b"}` now spans from end of `fn_a` to end of `fn_b` — function-to-function, not string-to-string.
+- Ambiguous hints return an error with a list of matches rather than silently picking the first.
+- `replace-function-body` `notFound` should now be near-zero for valid function names. If it fires, the function genuinely doesn't exist in that file.
+- All 9 function-search tools (`list-functions`, `search-functions`, `get-function-body`, `get-function-list-with-comments`, `list-project-functions`, `get-file-summary`, `get-structural-anchors`, `read-lines` functionHint path, `str_replace` functionHint path) now use the same tree-sitter backend — consistent results across all tools.
+
+**What is intentionally NOT migrated:** `GHIDRA_FUNC_RE` in `mcp-registration.js` — decompiled C placeholder names (`FUN_xxxxxxxx`, `DAT_`, `PTR_`) have no tree-sitter grammar. Regex is correct here.
+
+**Stats expectation:** The `replace-function-body` `notFound:10` in the v0.10.22 baseline snapshot (session 12) was entirely from the regex era. Post-migration sessions should show `notFound` approaching 0. `str_replace` `noMatch` and `whitespace` failures should also drop as better `functionHint` scoping reduces the search space.
+
+**Full tool audit passed:** All tools verified against `test/hal.c` and `test/test.c` in v0.10.22. `get-structural-anchors` scope bug (stale variable names from migration) was the only post-migration issue, fixed in v0.10.22.

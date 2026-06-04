@@ -57,6 +57,14 @@ Implemented as three tools:
 
 **Deferred items from original spec — CLOSED:** Hungarian prefixes, multi-style doc support, tier-3 verb counting, `namingcheck.docStyle` config, weak noun endings. Kernel style is the only enforced standard; these are not applicable.
 
+---
+
+### convert all tools to tree sitter
+
+convert all tools to use tree sitter with possible regx fallback, this will hopefully reduce the miss edits from wrong or missing matches.
+
+`get-edit-map` already uses tree sitter expand with a helper across tools.
+
 
 ---
 

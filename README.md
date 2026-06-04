@@ -36,6 +36,9 @@ All edit tools support scope hints that anchor by *content* rather than line num
 - `occurrence:N` — targets the Nth match when a pattern repeats
 - `fuzzyWhitespace:true` — matches ignoring indentation differences, commits using the buffer's actual whitespace — eliminates the most common retry loop
 
+### 🌳 Tree-sitter powered hint resolution — semantically correct anchors
+All hint resolution (`functionHint`, `afterHint`, `betweenHint`, `functionEnd`) is backed by Pulsar's tree-sitter parser for open files. This means `afterHint:"myFn"` resolves to the **end of that function's closing brace** — not just the first character occurrence of the string. `betweenHint:{start:"fn_a", end:"fn_b"}` spans from the closing brace of `fn_a` to the closing brace of `fn_b`. Ambiguous anchors (same function name in multiple places) return an error with line numbers rather than silently picking the wrong one. Regex fallback covers closed files and edge cases. The same symbol index powers `get-repo-map`, `list-project-functions`, `replace-function-body`, and all structural anchor tools.
+
 ### 📊 Per-tool edit stats — know exactly what's failing and why
 `get-edit-stats` tracks hits, faults, and misses **per tool** across the session and lifetime. Failure reasons are classified (`whitespace`, `partialMatch`, `ambiguous`, `outOfScope`) so you see patterns, not just counts. Hint usage is tracked separately so you can see whether the LLM is actually using the tools correctly. A live stats panel in Pulsar (**Packages → MCP Server → Show Edit Stats...**) shows the same data visually. No other coding assistant exposes this level of instrumentation.
 
@@ -148,6 +151,7 @@ Always loaded. Cannot be disabled.
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
 | `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed. Supports `occurrence:N` to target the Nth match of `startContent`. Tracks hintsUsed in stats |
+| `get-structural-anchors` | List all named anchors available in the active file (or any file via `filePath:`): section banner names (for `sectionHint`), `#ifdef`/`#ifndef` macro names (for `preprocBlock`), and function names with closing-brace line numbers (for `functionEnd`). Call before `insert` or `delete-block` when you need an anchor name. Uses tree-sitter for accurate function boundary detection |
 | `get-selection` | Return the currently selected text and its line/column range |
 | `get-context-around` | Return lines around the N-th match of a query — useful for targeted edits |
 | `find-text` | Find positions of a string or regex in the active editor. Supports `contextLines` and `occurrence:N`. Each result has `{ line, text, before?, after? }` |

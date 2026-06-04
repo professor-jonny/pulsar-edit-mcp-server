@@ -1,0 +1,456 @@
+{
+  "str_replace": {
+    "hits": 662,
+    "fails": {
+      "noMatch": 70,
+      "whitespace": 36,
+      "partialMatch": 12,
+      "ambiguous": 0,
+      "outOfScope": 0,
+      "afterNotFound": 0,
+      "wrongOccurrence": 0
+    },
+    "hintsUsed": {
+      "functionHint": 20,
+      "afterHint": 40,
+      "lineHint": 670,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "fuzzyWhitespaceCommits": 16,
+    "dryRuns": 4,
+    "_oldStrLenSum": 3172
+  },
+  "insert": {
+    "hits": 50,
+    "fails": {
+      "outOfRange": 0,
+      "anchorNotFound": 6
+    },
+    "hintsUsed": {
+      "functionHint": 2,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0,
+      "afterContent": 24,
+      "beforeContent": 12,
+      "functionEnd": 2,
+      "sectionHint": 0,
+      "preprocBlock": 0,
+      "endOfFile": 2
+    },
+    "dryRuns": 6
+  },
+  "delete_line_range": {
+    "hits": 36,
+    "fails": {
+      "outOfRange": 2,
+      "inverted": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 4,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 12
+  },
+  "replace_function_body": {
+    "hits": 20,
+    "fails": {
+      "notFound": 10,
+      "ambiguous": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 2,
+      "lineHint": 14,
+      "betweenHint": 0,
+      "occurrence": 2,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 28
+  },
+  "replace_block": {
+    "hits": 0,
+    "fails": {
+      "anchorNotFound": 0,
+      "braceMatchFailed": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "apply_patch": {
+    "hits": 0,
+    "fails": {
+      "contextMismatch": 6,
+      "exception": 6
+    },
+    "largeEditWarnings": 0,
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "replace_all": {
+    "hits": 2,
+    "fails": {
+      "noMatch": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "get_structural_anchors": {
+    "hits": 4,
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "delete_block": {
+    "hits": 6,
+    "fails": {
+      "anchorNotFound": 0,
+      "startNotFound": 0,
+      "endNotFound": 0
+    },
+    "hintsUsed": {
+      "functionHint": 10,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 10,
+      "fuzzyWhitespace": 0,
+      "sectionHint": 0,
+      "preprocBlock": 0,
+      "endContent": 16
+    },
+    "dryRuns": 0
+  },
+  "sed": {
+    "hits": 4,
+    "fails": {
+      "addressNotFound": 0,
+      "badExpression": 0,
+      "noMatch": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "read_lines": {
+    "hits": 478,
+    "fails": {
+      "outOfRange": 0,
+      "anchorNotFound": 0
+    },
+    "hintsUsed": {
+      "functionHint": 14,
+      "afterHint": 2,
+      "lineHint": 40,
+      "betweenHint": 2,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "get_region": {
+    "hits": 0,
+    "fails": {
+      "startNotFound": 0,
+      "endNotFound": 0
+    },
+    "hintsUsed": {
+      "functionHint": 0,
+      "afterHint": 0,
+      "lineHint": 0,
+      "betweenHint": 0,
+      "occurrence": 0,
+      "fuzzyWhitespace": 0
+    },
+    "dryRuns": 0
+  },
+  "get_selection": {
+    "hits": 2,
+    "dryRuns": 0
+  },
+  "find_text": {
+    "hits": 0,
+    "fails": {
+      "noMatch": 2
+    },
+    "dryRuns": 0
+  },
+  "get_linter_messages": {
+    "hits": 60,
+    "dryRuns": 0
+  },
+  "grep_file": {
+    "hits": 532,
+    "fails": {
+      "noMatch": 228
+    },
+    "hintsUsed": {
+      "occurrence": 32,
+      "contextLines": 284
+    }
+  },
+  "grep_project": {
+    "hits": 14,
+    "fails": {
+      "noMatch": 46
+    },
+    "hintsUsed": {
+      "occurrence": 0,
+      "contextLines": 8
+    }
+  },
+  "search_symbol": {
+    "hits": 2,
+    "fails": {
+      "noMatch": 0
+    },
+    "hintsUsed": {
+      "occurrence": 0,
+      "contextLines": 0
+    }
+  },
+  "replace_document": {
+    "hits": 24
+  },
+  "replace_across_files": {
+    "hits": 30,
+    "fails": {
+      "skipped": 0
+    },
+    "dryRuns": 50
+  },
+  "run_command": {
+    "hits": 278,
+    "fails": {
+      "spawnError": 0
+    },
+    "misses": {
+      "exitNonZero": 26,
+      "timedOut": 0
+    },
+    "get_repo_map": {
+      "hits": 0,
+      "fails": {
+        "noProject": 0
+      }
+    }
+  },
+  "get_repo_map": {
+    "hits": 34,
+    "fails": {
+      "noProject": 0
+    }
+  },
+  "close_file": {
+    "hits": 0,
+    "fails": {
+      "notFound": 0
+    }
+  },
+  "goto_focus": {
+    "hits": 0,
+    "fails": {
+      "noEditor": 0
+    }
+  },
+  "get_project_paths": {
+    "hits": 0,
+    "fails": {}
+  },
+  "add_project_path": {
+    "hits": 0,
+    "fails": {
+      "notFound": 0
+    }
+  },
+  "ghidra_list_functions": {
+    "hits": 0,
+    "fails": {
+      "noEditor": 0
+    }
+  },
+  "ghidra_search_functions": {
+    "hits": 6,
+    "fails": {
+      "noEditor": 0,
+      "noMatch": 0
+    }
+  },
+  "ghidra_get_function_body": {
+    "hits": 6,
+    "fails": {
+      "noEditor": 0,
+      "notFound": 0
+    }
+  },
+  "ghidra_get_xrefs": {
+    "hits": 0,
+    "fails": {
+      "noEditor": 0,
+      "noMatch": 0
+    }
+  },
+  "ghidra_add_comment": {
+    "hits": 0,
+    "fails": {
+      "noEditor": 0,
+      "notFound": 0
+    }
+  },
+  "ghidra_get_function_list_with_comments": {
+    "hits": 6,
+    "fails": {
+      "noEditor": 0
+    }
+  },
+  "namingcheck": {
+    "hits": 10,
+    "fails": {
+      "notKernel": 1
+    },
+    "misses": {
+      "clean": 1
+    }
+  },
+  "check_function_docs": {
+    "hits": 0,
+    "fails": {
+      "notKernel": 0
+    },
+    "misses": {
+      "allGood": 0
+    }
+  },
+  "insert_function_doc": {
+    "hits": 0,
+    "fails": {
+      "notKernel": 0,
+      "notFound": 0,
+      "noEditor": 0
+    }
+  },
+  "sessionCount": 12,
+  "set_selections": {
+    "hits": 0,
+    "fails": {
+      "noEditor": 0
+    }
+  },
+  "styleStats": {
+    "trailing_whitespace": {
+      "introduced": 0
+    },
+    "wrong_indentation": {
+      "introduced": 0
+    },
+    "dos_line_endings": {
+      "introduced": 0
+    },
+    "missing_newline_eof": {
+      "introduced": 0
+    },
+    "trailing_blank_lines": {
+      "introduced": 0
+    },
+    "line_too_long": {
+      "introduced": 0
+    },
+    "keyword_spacing": {
+      "introduced": 0
+    },
+    "space_before_semicolon": {
+      "introduced": 0
+    },
+    "paren_spacing": {
+      "introduced": 0
+    },
+    "comma_spacing": {
+      "introduced": 0
+    },
+    "operator_spacing": {
+      "introduced": 0
+    },
+    "pointer_spacing": {
+      "introduced": 0
+    },
+    "open_brace_control": {
+      "introduced": 0
+    },
+    "open_brace_function": {
+      "introduced": 0
+    },
+    "else_brace_placement": {
+      "introduced": 0
+    },
+    "space_before_open_brace": {
+      "introduced": 0
+    },
+    "brace_placement": {
+      "introduced": 0
+    },
+    "single_line_comment": {
+      "introduced": 0
+    },
+    "consecutive_blanks": {
+      "introduced": 0
+    },
+    "singleline_if": {
+      "introduced": 0
+    },
+    "_cleanEdits": 0,
+    "_totalCHEdits": 0,
+    "_totalViolations": 0,
+    "_checkpatchRuns": 1,
+    "_checkpatchViolations": 0
+  },
+  "check-function-docs": {
+    "hits": 13,
+    "fails": {},
+    "misses": {}
+  },
+  "insert-function-doc": {
+    "hits": 10,
+    "fails": {}
+  }
+}
