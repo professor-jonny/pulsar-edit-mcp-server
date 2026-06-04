@@ -2,14 +2,7 @@
 
 An MCP (Model Context Protocol) server and built-in chat assistant that lets an LLM control the [Pulsar](https://github.com/pulsar-edit) editor. Use the built-in chat panel or any compatible external client such as [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) or [Claude.ai](https://claude.ai).
 
-Tools have been curated from Ghidra, Cline, and Claude Code into a single package. A lazy-load discovery mechanism means the LLM is aware of all tools without paying the token cost of loading every schema upfront — groups are loaded on demand.
-the list of tools have been curated to match that of what LLMs natively use for code editing, but have had smart features added to help eliminate repeat attempts because of a stale view of the files or silly on incorrect methods or ordering of edits.
-
-metrics and view of the debug log enable the llm to view what goes wrong constantly so things can be fixed.
-
-
-
-> **Beta software** — tested but not production-hardened. Bug reports and suggestions are welcome!
+Tools have been curated from Ghidra, Cline, and Claude Code into a single package, then extended with instrumentation, failure recovery, and persistence features that no other tool has. A lazy-load discovery mechanism means the LLM is aware of all tools without paying the token cost of loading every schema upfront.> **Beta software** — tested but not production-hardened. Bug reports and suggestions are welcome!
 
 ---
 
@@ -25,7 +18,48 @@ If you work on LLM tooling, MCP servers, or agentic coding assistants, it's wort
 
 ---
 
-**Built-in chat panel:**
+## What makes this different
+
+Most MCP servers expose editor actions and call it done. This one treats LLM edit failures as a first-class problem and instruments everything around fixing them.
+
+### 🛡 Ambiguity guard — blocks silent wrong edits
+Before committing any edit, `str_replace`, `replace-block`, `replace-function-body`, and `delete-block` count **all** occurrences of the target pattern in the file. If more than one match exists and no scope hint is set, the edit is **blocked** — not silently applied to the wrong location. The response lists every matching line number and the exact hint to use. No other tool does this.
+
+### 🎯 Smart failure suggestions
+When `str_replace` fails to match, the response immediately analyses *why*: whitespace and indentation differences are reported line-by-line, how many consecutive lines matched before diverging is counted, and the closest area of the file is found via fuzzy word-scoring. The suggestion engine fires **on failure #1** — if `old_str` looks like a whole function it suggests `replace-function-body`; if it looks like a brace block it suggests `replace-block`; on a large file with no hints it adds urgency. Escalates at failure #2 with tool-switch recommendations. On a *successful* edit with no hints on a file >300 lines, a nudge appended tells you which hints to use next time — closing the loop before problems start.
+
+### 📐 Content-anchored editing — immune to line number drift
+All edit tools support scope hints that anchor by *content* rather than line number:
+- `functionHint` — scopes the search to inside a named function body
+- `afterHint` — starts the search after a unique anchor string
+- `betweenHint` — restricts the search to between two anchor strings (switch cases, struct blocks, `#ifdef` regions)
+- `occurrence:N` — targets the Nth match when a pattern repeats
+- `fuzzyWhitespace:true` — matches ignoring indentation differences, commits using the buffer's actual whitespace — eliminates the most common retry loop
+
+### 📊 Per-tool edit stats — know exactly what's failing and why
+`get-edit-stats` tracks hits, faults, and misses **per tool** across the session and lifetime. Failure reasons are classified (`whitespace`, `partialMatch`, `ambiguous`, `outOfScope`) so you see patterns, not just counts. Hint usage is tracked separately so you can see whether the LLM is actually using the tools correctly. A live stats panel in Pulsar (**Packages → MCP Server → Show Edit Stats...**) shows the same data visually. No other coding assistant exposes this level of instrumentation.
+
+### 🧠 Self-updating project memory.
+`session-notes` is a persistent store the LLM writes to and reads from across sessions. At the start of every session the LLM reads back what it wrote last time — which hints worked on this codebase, which files hot-reload, what caused retries — and adjusts immediately. Combined with `get-repo-map` at session start for structural orientation, the LLM arrives knowing both the code layout and accumulated lessons specific to this project. It improves automatically with use. No user maintenance needed.
+
+### ⚡ `@//` prompt shortcuts — reusable workflows in a plain text file
+Type `@//` in the chat input to open a live-filtered shortcut picker. Shortcuts are named blocks in a `shortcuts.md` file in your project root — edit them in Pulsar, they take effect immediately without reload. Select one to expand it inline into the input for editing before send. Functionally equivalent to Windsurf Cascade workflows at a fraction of the complexity.
+
+### 🎨 Inline C style checking — automatic on every edit
+For `.c`/`.h` files, every edit tool automatically runs the Linux kernel style checker against the lines it added or changed — only the new lines, never pre-existing content. Violations appear as a `🎨 style` suffix on the success response. `checkpatch` audits the full file on demand. No other tool has language-specific style enforcement at this depth.
+
+### 🏷 Kernel C naming and documentation tools
+Three tools enforce Linux kernel conventions that no other coding assistant touches:
+- **`namingcheck`** — scans for naming violations: functions missing a verb-tier prefix (`get_`, `set_`, `init_`, `handle_`, …), camelCase in function or variable names, `#define` macros not ALL_CAPS. Reports violations with line numbers.
+- **`check-function-docs`** — audits every non-static function for a kernel-doc `/**` comment. Three severity tiers: **missing** (no comment at all), **wrongStyle** (`//` line comment — always wrong for kernel), **plainDoc** (`/* */` present but not kernel-doc). Each entry includes the full function signature and an `[in header]` tag if the function is declared in the sidecar `.h`.
+- **`insert-function-doc`** — inserts a complete kernel-doc skeleton above a named function: `function_name() - desc`, `@param:` per argument (variadic `...` emits `@...:` per spec), `Context:`, `Return:`. Pass the `line:` from `check-function-docs` output for a precise anchor. Aborts cleanly if a comment already exists.
+
+### 🔬 Ghidra reverse engineering integration
+A full suite of Ghidra RE tools — `list-functions`, `search-functions`, `get-function-body`, `get-xrefs`, `add-comment`, `get-function-list-with-comments` — bridges the gap between Ghidra's pseudocode export and real compilable C. Disabled by default; enable with one command.
+
+### 🩹 apply-patch fuzzy rescue
+When a unified diff patch fails to apply, the tool automatically attempts fuzzy/indent-aware hunk recovery and shows a corrected diff preview. Reply with `confirm:true` to apply the rescued version — no need to rewrite the patch.
+
 
 <img src="https://github.com/user-attachments/assets/52c74f89-d76f-4faa-9265-009bdc78c32c" width="700" />
 
@@ -244,6 +278,16 @@ The built-in chat panel serves two roles: an LLM chat interface (when an API key
 **Copy and paste** — text in the output area is selectable by mouse drag or Ctrl+A/Ctrl+C. Right-click on the output area shows Copy and Select All. Right-click on the input box shows Cut, Copy, Paste, and Select All. Note: image clipboard content (e.g. print screen) cannot be pasted into the text input — text only.
 
 **Opening the panel** — use **Packages → MCP Server → Show Chat Panel** or the command palette (`pulsar-edit-mcp-server:show-chat-panel`).
+
+**Model selector** — a searchable combobox above the input. Models are fetched from the configured API endpoint and sorted alphabetically. Type to filter the list in real time; the dropdown opens upward above the input. The selected model is persisted across Pulsar restarts — the last-used model is restored automatically on next open. A **✕** button beside the input clears the selection and the persisted value.
+
+**`@//` shortcuts** — type `@//` in the chat input to open a shortcut picker dropdown. Continue typing to filter by name. Enter or click to expand the shortcut body inline into the input for editing before send. Escape dismisses the dropdown. Shortcuts are defined in a `shortcuts.md` file in the project root using named blocks:
+```
+@//shortcut-name {
+  freeform prompt text sent to chat on expand
+}
+```
+The file is re-read on every trigger — edits take effect without reload. If `shortcuts.md` does not exist it is auto-created with sample content on first chat panel open.
 
 ### tool metrics
 - the tools have failure counters and if triggered will alert thee llm that maybe the choice of tooling is not correct or they are using it wrong

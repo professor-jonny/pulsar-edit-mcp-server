@@ -13,18 +13,9 @@
 
 ## TODO
 
-### Chat panel MCP connect/disconnect toggle
+### ~~Chat panel MCP connect/disconnect toggle~~ ❌ REMOVED
 
-UI switch in the chat panel header to connect or release the local MCP client on demand — allows Claude Desktop and the chat panel LLM to share the server without conflict (only one holds the session at a time).
-
-- Toggle button in header: `🟢 MCP Connected` / `🔴 MCP Disconnected`
-- `connectMcp()`: calls `startMcpClient()` via a callback passed into ChatPanel constructor, stores result in `this.mcpClient`, clears `mcpTools` cache
-- `disconnectMcp()`: closes transport, nulls `this.mcpClient`, clears `mcpTools` cache
-- Package passes `connectFn` / `disconnectFn` callbacks into `new ChatPanel(connectFn, disconnectFn)` — avoids circular module deps
-- Button disabled (greyed) while connecting (async)
-- On disconnect: next Send shows the existing "MCP server not connected" error rather than crashing
-
-**Complexity:** Low.
+Not needed. The server is HTTP-based — Claude Desktop and the chat panel LLM client hold independent sessions simultaneously with no contention. No toggle required.
 
 ### Visual diff decorations (Cursor-parity)
 
@@ -40,12 +31,21 @@ Render proposed changes as inline editor decorations — green/red lines in the 
 
 ### Inline diff in chat panel
 
-Show before/after diff rendered directly in the chat display after each edit — no new tab, no editor clutter. Agreed approach after comparing Claude Code / Cline / Aider (none highlight or move cursor; Cline uses a diff tab which creates tab noise).
+Show before/after diff rendered directly in the chat display after each edit — no new tab, no editor clutter.
 
-- `diff` library already imported in codebase
-- Render unified diff block as HTML in chat display after each edit tool call
-- Collapsible or auto-scrolled
-- Medium complexity
+**How other tools do it (researched 2026-06-04):**
+- **Cursor** — renders green/red line decorations inline *in the editor file itself* before accept/reject. Requires deep VS Code fork access to the rendering layer. Not replicable in a Pulsar extension without the visual diff decorations feature below.
+- **Cline** — opens a native VS Code side-by-side diff tab per edit. Works but creates tab noise — the exact thing we want to avoid.
+- **Claude Code (VS Code ext)** — inconsistent: small edits show a diff block inline in the *chat panel*; full file writes open a side-by-side editor tab. Users are complaining about the inconsistency. The `+12 -1` stats indicator in Claude Desktop is a lighter alternative.
+- **Aider** — terminal only. Diffs are opt-in via `/diff` command or `--show-diffs` flag. Retroactive, not pushed.
+
+**Proposed approach** — inline diff block in the chat display after each edit, matching what Claude Code does for small edits (the better half of their inconsistent UX):
+- `diff` library already imported
+- Collapsible block with `+N -N` summary line (matches Claude Desktop stats indicator) — click to expand full unified diff
+- Always visible summary, detail on demand — avoids noise for large edits
+- `chat-functions.js` + `chat-panel.js` only, no new tools needed
+
+**Complexity:** Medium.
 
 ### ~~`naming-checker.js` — function naming + doc template validation~~ ✅ DONE (v0.10.6)
 
@@ -55,12 +55,7 @@ Implemented as three tools:
 - **`check-function-docs`** — three-tier report (missing / wrongStyle / plainDoc). Each entry includes `signature`, `[in header]` tag (sidecar `.h` detection), and `line:` anchor. Kernel `.c`/`.h` only.
 - **`insert-function-doc`** — inserts kernel-doc `/**` skeleton with `@param:`, `Context:`, `Return:`. Accepts `line:` from `check-function-docs` for precise anchor. Kernel `.c`/`.h` only.
 
-**Remaining from original spec (deferred):**
-- Multi-style doc support (`doxygen`, `ghidra`, `misra`, `plain`) — currently kernel-only
-- Hungarian prefix enforcement (`g_`, `s_`, `m_` etc.)
-- Tier-3 verb / specifier-token counting
-- `namingcheck.docStyle` config in package.json
-- Weak noun endings check (`Data`, `Info`, `Helper` etc.)
+**Deferred items from original spec — CLOSED:** Hungarian prefixes, multi-style doc support, tier-3 verb counting, `namingcheck.docStyle` config, weak noun endings. Kernel style is the only enforced standard; these are not applicable.
 
 
 ---
@@ -72,8 +67,58 @@ Implemented as three tools:
 
 ---
 
-## ON HOLD — File Split
+## Feature Gap Analysis — vs Other Tools (researched 2026-06-04)
 
+### What we have that others don't
+- **Kernel C style checker** — inline, per-edit, rule-level violation reporting. No other tool does language-specific style at this depth.
+- **naming-checker** — verb-segment, camelCase, doc skeleton generation. Unique.
+- **Ghidra integration** — reverse engineering workflow. Unique.
+- **Edit stats + hints system** — tracks hit/fault rates per tool, surfaces smarter suggestions based on failure patterns. Unique.
+- **Self-updating project rules + repo map** — `session-notes` acts as a living CLAUDE.md: the LLM writes its own codebase-specific rules, tool preferences, and lessons learned, then reads them back at the start of every session. Combined with `get-repo-map` at session start, the LLM arrives with full structural context and accumulated knowledge of what works on this codebase. Better than a static user-written rules file because it improves automatically.
+- **`@//` prompt shortcuts** — named prompt templates in `shortcuts.md`, invokable from the chat input with live filter dropdown. Functionally equivalent to Windsurf Cascade workflows at a fraction of the complexity.
+- **apply-patch fuzzy rescue** — automatic fuzzy hunk recovery with confirm:true flow. Not seen elsewhere.
+
+### What others have that we don't — gap table
+
+| Feature | Cursor | Windsurf | Cline | Claude Code | Us | ★ Unique to us | Notes |
+|---|---|---|---|---|---|---|---|
+| Plan mode (describe task → plan → approve) | ✅ | ✅ | ✅ | ✅ | ❌ | | High value. LLM proposes step-by-step plan in chat before touching files. User approves/edits plan first. |
+| Per-step approval in agentic runs | ✅ | ✅ | ✅ | ✅ | ❌ | | Each tool call shows intent + asks confirm before executing. |
+| Inline diff in editor (green/red decorations) | ✅ | ✅ | ❌ | ❌ | ❌ | | Already in plan as visual diff decorations. Cursor-only due to fork. |
+| Inline diff in chat panel | ❌ | ❌ | ❌ | ✅ (partial) | ❌ | | Already in plan. |
+| Reusable task workflows / recipes | ❌ | ✅ Cascade | ❌ | ❌ | ✅ `@//` | ★ | `@//` shortcuts in `shortcuts.md` — named prompt templates with live filter dropdown. Equivalent to Windsurf Cascade workflows, simpler format. |
+| Context window usage indicator | ❌ | ❌ | ✅ | ✅ | ❌ | | Token count + cost per interaction shown in chat. Low-medium value. |
+| Auto context compaction / summarisation | ❌ | ❌ | ❌ | ✅ /compact | ❌ | | Summarises old history to free window. Medium value for long sessions. |
+| CLAUDE.md / project rules file | ❌ | ❌ | ❌ | ✅ | ✅ | ★ | Covered by session-notes: LLM writes and self-updates its own rules, tool preferences, and lessons. Read back at every session start. Better than a static file — improves automatically with use. |
+| Codebase orientation / repo map on startup | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | get-repo-map called at session start gives full structural context. Combined with session-notes, the LLM arrives knowing both the code layout and accumulated lessons for this project. |
+| Multi-agent / parallel agents | ✅ (8x) | ✅ Cascade | ✅ Kilo fork | ✅ Agent tool | ❌ | | Complex. Out of scope for single-server architecture. |
+| Arena mode (compare model outputs) | ❌ | ✅ | ❌ | ❌ | ❌ | | Run same task on 2+ models, pick winner. Interesting but niche. |
+| Auto model selection per task | ✅ Auto | ❌ | ❌ | ❌ | ❌ | | Cursor picks best model automatically. We have manual model combobox with persistence. |
+| Browser / web access during task | ❌ | ❌ | ✅ | ✅ | ❌ | | Cline/Claude Code can fetch URLs mid-task. run-command + curl is a workaround. |
+| Spend / token limit guard | ❌ | ❌ | ✅ | ❌ | ❌ | | Cline v3.78 added spend limit UI to stop runaway agents. |
+| .cursorrules / per-project AI config | ✅ | ❌ | ❌ | ❌ | ❌ | | Per-project rules file that shapes AI behaviour. We cover this via session-notes (see above). |
+| Checkpoint / restore mid-task | ❌ | ❌ | ✅ shadow git | ❌ | ✅ (buffer only) | | Cline uses shadow git repo for checkpoints. We have buffer checkpoints (wiped on server save). Disk-backed checkpoints would be stronger. |
+| Kernel C style checking (inline per-edit) | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Per-edit violation reporting scoped to changed lines. Rule-level breakdown. checkpatch for full-file audit. |
+| Function naming + doc skeleton generation | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | namingcheck, check-function-docs, insert-function-doc. Kernel C only. |
+| Ghidra reverse engineering integration | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Full RE tool suite via Ghidra MCP bridge. |
+| Edit stats + smart failure suggestions | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Per-tool hit/fault/hint tracking. Surfaces tool-switch suggestions on first failure, not third. |
+| Persistent cross-session LLM notes | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | session-notes tool. LLM writes lessons learned; reads them back next session. Self-improving — no user maintenance needed. |
+| Aider-style repo map (tree-sitter) | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | get-repo-map with PageRank symbol ranking. Integrated natively, no Aider install needed. |
+| apply-patch fuzzy rescue | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Auto fuzzy hunk recovery with confirm:true flow on failure. |
+
+### Highest value gaps to consider
+
+1. **Plan mode** — describe task → LLM outputs numbered step plan in chat → user approves/edits → execution begins. Prevents wasted edits on misunderstood tasks. All four major tools have this. Could be a chat panel mode toggle (`/plan` prefix or Plan button). LOW-MEDIUM implementation complexity — it's a prompting/UX pattern, not a new tool.
+
+2. **Per-step approval** — before each tool call in an agentic run, show intent in chat and wait for user confirm. Cline's defining UX. Pairs naturally with plan mode. MEDIUM complexity — requires chat panel to intercept tool dispatch.
+
+3. **Context window indicator** — show token usage in chat panel header. MEDIUM-LOW complexity — needs token counting on the callLLM response (usage field already in API response).
+
+4. **Disk-backed checkpoints** — current checkpoints are wiped on every mcp-registration.js save (hot-reload). A `checkpoint-to-disk` / `restore-from-disk` tool pair using a named snapshot file would survive reloads. LOW complexity.
+
+5. **Reusable workflows** — named prompt+tool recipes stored in a JSON file, invokable by name from chat. Windsurf Cascade's killer workflow feature. MEDIUM complexity. `@//` shortcuts cover the prompt-template use case already — this would add tool sequencing on top.
+
+---
 ### LARGE — Split `mcp-registration.js` into per-tool files
 
 **Status:** On hold indefinitely. The original motivation was crash recovery — a syntax error in the monolith killed all tools. This has not been an issue since common schemas (ANCHOR_SCHEMA etc.) were introduced. Risk/reward no longer justifies the effort.

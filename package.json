@@ -1,7 +1,7 @@
 {
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
-  "version": "0.10.6",
+  "version": "0.10.18",
   "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
   "keywords": ["mcp", "llm", "ai", "pulsar", "editor"],
   "activationHooks": [

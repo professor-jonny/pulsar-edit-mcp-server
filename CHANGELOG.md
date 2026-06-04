@@ -1,4 +1,88 @@
-## 0.10.6
+## 0.10.19
+
+- README: added `## What makes this different` showcase section after `## Why this exists`. Covers ambiguity guard, smart failure suggestions, content-anchored editing, per-tool edit stats, self-updating project memory (session-notes + get-repo-map), `@//` shortcuts, inline C style checking, Ghidra integration, and apply-patch fuzzy rescue. Each feature has a heading, emoji, and competitive callout.
+- README: cleaned up intro paragraph (removed rough draft lines 5–8, tightened description).
+- package.json: bumped 0.10.18 → 0.10.19.
+
+---
+
+## 0.10.18
+
+- README: documented model selector (searchable combobox, alphabetical sort, upward dropdown), model persistence across restarts, and ✕ clear button — features from v0.10.7 and v0.10.12 that were missing from the Chat panel section.
+- package.json: bumped 0.10.17 → 0.10.18.
+
+---
+
+## 0.10.17
+
+- README: documented `@//` shortcuts in the Chat panel section.
+- mcp-server-refactor-plan.md: removed `@//` shortcuts item and detail section (implemented in v0.10.16).
+- package.json: bumped 0.10.16 → 0.10.17.
+
+---
+
+## 0.10.16
+
+### Added
+- **`@//` chat shortcuts** — type `@//` in the chat input to open a shortcut picker dropdown. Shortcuts are defined in a `shortcuts.md` file in the project root using named blocks:
+  ```
+  @//shortcut-name {
+    freeform prompt text sent to chat on expand
+  }
+  ```
+  Continue typing after `@//` to filter by name. Enter or click to expand the shortcut body inline into the input for editing before send. Escape dismisses. File is re-read on every trigger — edits take effect without reload.
+- **`shortcuts.md`** — new project-root file format. Stack multiple `@//name { ... }` blocks. Plain text, editable in Pulsar without touching source. **Auto-created with sample shortcuts on first chat panel open** if the file does not exist in the project root.
+
+### Changed
+- `chat-panel.js`: added `fs`/`path` requires, `parseShortcuts()` parser, shortcut dropdown element + render/filter logic, updated `keydown` and `input` handlers.
+- `styles/pulsar-edit-mcp-server.less`: added `.shortcut-dropdown`, `.shortcut-item`, `.shortcut-empty` styles.
+
+**Requires:** Pulsar package reload (chat-panel.js does not hot-reload).
+
+---
+
+## 0.10.15
+
+- pulsar-edit-mcp-server.js: `restartServer()` now awaits the `listening` event on the HTTP server before calling `startMcpClient()`. Previously the client tried to connect before the server had fully bound to the port, causing a silent connection failure and leaving `chatPanel.mcpClient` null. `listenToggle()` uses the same `once('listening')` pattern.
+- chat-functions.js: `tools` and `tool_choice` are now only added to the request body when `availableTools.length > 0`. Sending an empty tools array causes some OpenRouter models to error or behave unexpectedly.
+
+## 0.10.14
+
+- chat-panel.js: model dropdown was invisible after reload because the `focus` handler had `if (allModelIds.length)` guard — if `fetchModels()` failed or hadn't resolved yet, focusing the input did nothing. Now on focus with empty list it retries `fetchModels()` immediately, shows "Loading models…" placeholder during fetch, then opens the dropdown. Also handles the case where apiKey was set after the panel first opened.
+
+## 0.10.13
+
+- chat-functions.js: exported `clearMcpTools()` which resets the module-level `mcpTools` cache to null. Previously the tool list was fetched once and cached forever — after a server restart the new MCP session would try to call tools against the stale cache or skip fetching entirely.
+- chat-panel.js: `setMcpClient()` now calls `clearMcpTools()` so the tool list is re-fetched from the new session on the next send.
+- chat-panel.js: imported `clearMcpTools` from `./chat-functions`.
+- styles: `.model-combo-list` now has `display: none` in CSS as the default state (belt-and-suspenders with the JS `style.display = 'none'`). Dropdown `bottom` changed to `calc(100% + 2px)` to clear the full combo row height not just the input.
+
+## 0.10.12
+
+- chat-panel.js: Model selector now persists the selected model via `atom.config.set('pulsar-edit-mcp-server.lastSelectedModel')`. On restart the saved model is restored immediately into the input before the model list loads. If the saved model is still in the list it is kept; otherwise falls back to the first alphabetical model.
+- chat-panel.js: Added ✕ clear button beside the model input. Clears the selection and the persisted value, returns focus to the input.
+- styles: `.model-combo-row` flex layout, `.model-combo-clear` styling for the clear button.
+
+## 0.10.11
+
+- pulsar-edit-mcp-server.js: `restartServer()` and `listenToggle()` now use `this.chatPanel || chatPanelRef` when starting the MCP client. `this.chatPanel` is null after a warm restart (opener doesn't re-run), causing `setMcpClient()` to never be called on the existing panel. `chatPanelRef` is always kept current via the pane scan in `activate()`.
+- chat-panel.js: MCP-not-connected warning now shows only once per disconnect (guarded by `_mcpWarnShown` flag). Flag resets when `setMcpClient()` is called so it will warn again if MCP drops later.
+
+
+- chat-functions.js: `apiEndpointPrefix` and `apiKey` are now read from settings on every call instead of frozen at module load time. Changing either setting in Preferences now takes effect immediately without a package reload. `fetchModels` also re-fetches on every open of the model combobox (no stale cache after an endpoint change). Error messages from model-list failures now also include the HTTP status and body.
+
+## 0.10.9
+
+- chat-functions.js: HTTP error responses now read the JSON body for the actual error message. Previously `!response.ok` threw `Error: Error:` (empty statusText from HTTP/2). Now shows e.g. `HTTP 429: Rate limit exceeded`.
+
+## 0.10.8
+
+- Chat panel: removed hard block on send when MCP server is not connected. Chat now works without MCP; a warning is shown but the message is still sent. Tools are unavailable when MCP is down but plain LLM chat is unaffected.
+
+## 0.10.7
+
+- Chat panel model selector replaced with a searchable combobox. Models are sorted alphabetically on load. Typing in the input filters the list in real time. Dropdown opens upward above the input field. Selected model is highlighted in the list.
+
 
 ### Changed
 - `check-function-docs`: each result entry now includes `signature` (full function definition line) and `inHeader` (bool — true if the function name appears in the corresponding `.h` file). Output report shows `[in header]` tag and `sig:` line per entry. `plainDoc` tier now included in report output.
