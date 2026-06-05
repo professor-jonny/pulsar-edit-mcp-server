@@ -1,21 +1,19 @@
 # pulsar-edit-mcp-server — Work Tracking
 
-> Last audited against live code: 2026-06-03
+> Last audited against live code: 2026-06-05
 
 ## Files
 
 - `lib/mcp-registration.js` — ~6539 lines. Full Pulsar restart + babel cache clear required for registerTool/schema changes. Handler body changes hot-reload on save.
 - `lib/pulsar-edit-mcp-server.js` — UI file (~865 lines).
 - `lib/chat-panel.js` — Chat panel UI. Requires Pulsar reload (no hot-reload).
+- `lib/tree-sitter-symbols.js` — Tree-sitter symbol extraction + anchor resolution. Hot-reloads on save.
+- `lib/naming-checker.js` — Kernel C naming + doc validation. Hot-reloads on save.
 - `styles/pulsar-edit-mcp-server.less` — Stylesheet. Hot-reloads on save.
 
 ---
 
 ## TODO
-
-### ~~Chat panel MCP connect/disconnect toggle~~ ❌ REMOVED
-
-Not needed. The server is HTTP-based — Claude Desktop and the chat panel LLM client hold independent sessions simultaneously with no contention. No toggle required.
 
 ### Visual diff decorations (Cursor-parity)
 
@@ -47,24 +45,18 @@ Show before/after diff rendered directly in the chat display after each edit —
 
 **Complexity:** Medium.
 
-### ~~`naming-checker.js` — function naming + doc template validation~~ ✅ DONE (v0.10.6)
-
-Implemented as three tools:
-
-- **`namingcheck`** — camelCase, verb-segment, macro ALL_CAPS checks. Kernel `.c`/`.h` only.
-- **`check-function-docs`** — three-tier report (missing / wrongStyle / plainDoc). Each entry includes `signature`, `[in header]` tag (sidecar `.h` detection), and `line:` anchor. Kernel `.c`/`.h` only.
-- **`insert-function-doc`** — inserts kernel-doc `/**` skeleton with `@param:`, `Context:`, `Return:`. Accepts `line:` from `check-function-docs` for precise anchor. Kernel `.c`/`.h` only.
-
-**Deferred items from original spec — CLOSED:** Hungarian prefixes, multi-style doc support, tier-3 verb counting, `namingcheck.docStyle` config, weak noun endings. Kernel style is the only enforced standard; these are not applicable.
-
 ---
 
-### convert all tools to tree sitter
+### Extend `smartSuggestion` to remaining edit tools
 
-convert all tools to use tree sitter with possible regx fallback, this will hopefully reduce the miss edits from wrong or missing matches.
+`smartSuggestion` fires on failure #1 and gives the LLM targeted guidance on what to try next. Currently wired to: `str_replace`, `insert`, `delete-line-range`, `delete-block`, `sed`, `apply-patch`.
 
-`get-edit-map` already uses tree sitter expand with a helper across tools.
+Missing:
+- **`replace-block`** — has `anchorNotFound` and `braceMatchFailed` failure paths with no smart suggestion. Medium value — brace-match failures are confusing without guidance.
+- **`replace-function-body`** — has its own fuzzy name-scoring on `notFound` but not the full `smartSuggestion` system (no hint nudge, no escalation counter). Lower priority now tree-sitter makes `notFound` rare.
+- **`replace-all`** / **`replace-across-files`** — minimal failure modes, low value.
 
+**Complexity:** Low — copy the existing `smartSuggestion` call pattern from `delete-block` into the `replace-block` failure paths. One session.
 
 ---
 
@@ -85,6 +77,7 @@ convert all tools to use tree sitter with possible regx fallback, this will hope
 - **Self-updating project rules + repo map** — `session-notes` acts as a living CLAUDE.md: the LLM writes its own codebase-specific rules, tool preferences, and lessons learned, then reads them back at the start of every session. Combined with `get-repo-map` at session start, the LLM arrives with full structural context and accumulated knowledge of what works on this codebase. Better than a static user-written rules file because it improves automatically.
 - **`@//` prompt shortcuts** — named prompt templates in `shortcuts.md`, invokable from the chat input with live filter dropdown. Functionally equivalent to Windsurf Cascade workflows at a fraction of the complexity.
 - **apply-patch fuzzy rescue** — automatic fuzzy hunk recovery with confirm:true flow. Not seen elsewhere.
+- **Tree-sitter symbol resolution** — all hint/anchor resolution (afterHint, betweenHint, functionHint) backed by tree-sitter live buffer. Regex fallback for unsupported grammars (Ghidra decompiled C). Unique depth for a Pulsar extension.
 
 ### What others have that we don't — gap table
 
@@ -113,6 +106,7 @@ convert all tools to use tree sitter with possible regx fallback, this will hope
 | Persistent cross-session LLM notes | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | session-notes tool. LLM writes lessons learned; reads them back next session. Self-improving — no user maintenance needed. |
 | Aider-style repo map (tree-sitter) | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | get-repo-map with PageRank symbol ranking. Integrated natively, no Aider install needed. |
 | apply-patch fuzzy rescue | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Auto fuzzy hunk recovery with confirm:true flow on failure. |
+| Tree-sitter anchor resolution | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | afterHint/betweenHint/functionHint all resolved via tree-sitter live buffer. resolveAnchor() resolves to function end semantically, not first char occurrence. |
 
 ### Highest value gaps to consider
 
@@ -132,6 +126,37 @@ convert all tools to use tree sitter with possible regx fallback, this will hope
 **Status:** On hold indefinitely. The original motivation was crash recovery — a syntax error in the monolith killed all tools. This has not been an issue since common schemas (ANCHOR_SCHEMA etc.) were introduced. Risk/reward no longer justifies the effort.
 
 **Revisit if:** the file grows significantly beyond 6200 lines, or anchor collision failures return.
+
+
+---
+
+### str_replace character-matching robustness (fuzzyContent + regex mode)
+
+**Problem:** `str_replace` does exact byte-for-byte matching. Fails on `old_str` containing backticks, pipe characters, emoji, smart/typographic quotes, BOM, zero-width chars, and escape sequences. Documented failure classes in session notes: markdown table rows (pipes), emoji headings, template literal lines, require-lines adjacent to block comments. No existing tool (Claude Code, Cline) has solved this — they all fall back to whole-file write which corrupts context.
+
+**Fix — three layers, implement in order:**
+
+**Layer 1 — `fuzzyContent` normalization (highest ROI, lowest risk)**
+Extend the existing `fuzzyWhitespace` infrastructure with a parallel `fuzzyContent` pass. Normalize for the *comparison only*; commit using the buffer's actual content (same pattern as `fuzzyWhitespace`). Characters to normalize:
+- Typographic/smart quotes (`"` `"` `'` `'`) → straight equivalents
+- BOM (`\uFEFF`) → stripped
+- Zero-width chars (`\u200B`, `\u200C`, `\u200D`, `\uFEFF`, `\u00A0`) → stripped or space
+- Mixed line endings (`\r\n` vs `\n`) → already handled, verify
+- Emoji: match by skipping codepoint ranges U+1F000–U+1FFFF / U+2600–U+27BF in both sides during compare
+Add `fuzzyContentCommits` stat counter alongside `fuzzyWhitespaceCommits` so we can measure real-world hit rate once live.
+
+**Layer 2 — auto delete+insert fallback when `lineHint` present**
+When both exact match and `fuzzyContent` match fail but `lineHint` is provided and points to a confirmed line (grep-file verified), silently fall back to: delete the matched line(s) + insert `new_str` at that position. This makes `str_replace + lineHint` a near-guarantee — character encoding becomes irrelevant when we have a confirmed line number. Surface as a new failure reason `lineHintFallback` in stats so we can track usage.
+
+**Layer 3 — `regex: true` mode as explicit LLM escape hatch**
+Expose a `regex: true` flag on `str_replace` so the LLM can write `old_str` as a pattern that wildcards over problematic characters rather than matching them exactly (e.g. `` const foo = `.*?` `` to skip backtick contents). The existing regex path is partially there but not exposed as a first-class param. This is what Serena does and it's the cleanest power-user solution. Genuinely novel — no other MCP edit server ships this.
+
+**Files to change:** `lib/mcp-registration.js` (str_replace handler, stats init, summarise output).
+
+**Stat additions:** `fuzzyContentCommits`, `lineHintFallback` counter in the str_replace stats block.
+
+**Priority:** Layer 1 > Layer 2 > Layer 3. Layer 1 alone covers smart quotes + BOM + zero-width which are the most common silent failures.
+
 
 ---
 

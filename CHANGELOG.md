@@ -1,3 +1,44 @@
+## 0.10.23
+
+### `str_replace` — Unicode robustness suite (Stages 1–3)
+
+Three new matching modes address a long-standing failure class where LLM-generated `old_str` contains Unicode characters that differ from what the buffer contains — smart quotes vs straight quotes, em dashes, non-breaking spaces, zero-width characters, and emoji. These were previously untraceable `noMatch` failures.
+
+#### Stage 1 — `fuzzyContent:true` (Unicode normalisation)
+
+- Normalises both `old_str` and the buffer to ASCII-equivalent before matching: BOM, zero-width/soft-hyphen, NBSP → space, smart single/double quotes → straight, en/em dash → hyphen, surrogate pairs (emoji) stripped.
+- Match found on the normalised string; replacement slices from the **original** buffer at the discovered position — buffer content is preserved exactly, only the search is normalised.
+- New stat: `fuzzyContentCommits` — counts how often this path saved a retry.
+- Schema: `fuzzyContent: z.boolean().optional()`. Requires Pulsar package reload.
+
+#### Stage 2 — `lineHintFallback` (position-based auto-rescue)
+
+- When exact match fails AND `lineHint` is set, the handler falls back to a direct positional replace at the line hint row — no content match required.
+- Intended for encoding-agnostic situations where the tool knows exactly where the target line is (e.g. from a prior `grep-file` result) but the buffer content contains unpredictable Unicode.
+- Success response tagged `[lineHintFallback]` to signal the caller this path was used.
+- New stat: `lineHintFallback` — counts blind-positional fallback commits.
+- **Caution:** a wrong `lineHint` will silently corrupt. The tag in the response signals the caller.
+- Requires Pulsar package reload (new schema key).
+
+#### Stage 3 — `regex:true` (LLM escape hatch)
+
+- Treats `old_str` as a JavaScript `/gm` regular expression. Use `.` to wildcard single problematic chars (em dash, smart quotes), `.*` for spans, `\*` for literal asterisk.
+- Invalid patterns return a clean error with the JS error message.
+- Success/dryRun responses tagged `[regex]`.
+- New stat: `regexCommits`.
+- `occurrence:N` applies to regex matches; `lineHint` provides the search window.
+- When both `regex:true` AND `lineHint` are set: Layer 2 (lineHintFallback) fires first if the regex finds no match — lineHint is the stronger signal. To force regex-only, omit `lineHint`.
+
+#### Test coverage
+
+All six Unicode character classes confirmed passing against `test/fuzzy_content_test.c`: smart double quotes (U+201C/D), em dash (U+2014), en dash (U+2013), NBSP (U+00A0), smart single quote (U+2019), zero-width space (U+200B). All three paths confirmed: match+commit, dryRun, invalid pattern error.
+
+**Requires:** Pulsar package reload (schema changes in all three stages).
+
+- package.json: bumped 0.10.22 → 0.10.23.
+
+---
+
 ## 0.10.22
 
 - **Bug fix: `get-structural-anchors`** — handler was referencing `resolvedPath` and `text` variables that were not declared in its scope. Introduced during the v0.10.20 tree-sitter migration when the function-ends block was updated to call `getSymbols()` but the variable declarations were not updated to match.

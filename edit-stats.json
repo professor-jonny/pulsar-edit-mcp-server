@@ -1,10 +1,10 @@
 {
   "str_replace": {
-    "hits": 662,
+    "hits": 760,
     "fails": {
-      "noMatch": 70,
+      "noMatch": 78,
       "whitespace": 36,
-      "partialMatch": 12,
+      "partialMatch": 14,
       "ambiguous": 0,
       "outOfScope": 0,
       "afterNotFound": 0,
@@ -13,17 +13,20 @@
     "hintsUsed": {
       "functionHint": 20,
       "afterHint": 40,
-      "lineHint": 670,
+      "lineHint": 788,
       "betweenHint": 0,
       "occurrence": 0,
       "fuzzyWhitespace": 0
     },
-    "fuzzyWhitespaceCommits": 16,
-    "dryRuns": 4,
-    "_oldStrLenSum": 3172
+    "fuzzyWhitespaceCommits": 20,
+    "fuzzyContentCommits": 0,
+    "regexCommits": 2,
+    "lineHintFallback": 56,
+    "_oldStrLenSum": 3406,
+    "dryRuns": 17
   },
   "insert": {
-    "hits": 50,
+    "hits": 58,
     "fails": {
       "outOfRange": 0,
       "anchorNotFound": 6
@@ -35,12 +38,12 @@
       "betweenHint": 0,
       "occurrence": 0,
       "fuzzyWhitespace": 0,
-      "afterContent": 24,
-      "beforeContent": 12,
+      "afterContent": 28,
+      "beforeContent": 14,
       "functionEnd": 2,
       "sectionHint": 0,
       "preprocBlock": 0,
-      "endOfFile": 2
+      "endOfFile": 4
     },
     "dryRuns": 6
   },
@@ -161,7 +164,7 @@
     "fails": {
       "addressNotFound": 0,
       "badExpression": 0,
-      "noMatch": 0
+      "noMatch": 2
     },
     "hintsUsed": {
       "functionHint": 0,
@@ -174,7 +177,7 @@
     "dryRuns": 0
   },
   "read_lines": {
-    "hits": 478,
+    "hits": 528,
     "fails": {
       "outOfRange": 0,
       "anchorNotFound": 0
@@ -182,7 +185,7 @@
     "hintsUsed": {
       "functionHint": 14,
       "afterHint": 2,
-      "lineHint": 40,
+      "lineHint": 54,
       "betweenHint": 2,
       "occurrence": 0,
       "fuzzyWhitespace": 0
@@ -210,34 +213,34 @@
     "dryRuns": 0
   },
   "find_text": {
-    "hits": 0,
+    "hits": 6,
     "fails": {
       "noMatch": 2
     },
     "dryRuns": 0
   },
   "get_linter_messages": {
-    "hits": 60,
+    "hits": 66,
     "dryRuns": 0
   },
   "grep_file": {
-    "hits": 532,
+    "hits": 602,
     "fails": {
-      "noMatch": 228
+      "noMatch": 238
     },
     "hintsUsed": {
-      "occurrence": 32,
-      "contextLines": 284
+      "occurrence": 34,
+      "contextLines": 312
     }
   },
   "grep_project": {
-    "hits": 14,
+    "hits": 18,
     "fails": {
-      "noMatch": 46
+      "noMatch": 50
     },
     "hintsUsed": {
       "occurrence": 0,
-      "contextLines": 8
+      "contextLines": 10
     }
   },
   "search_symbol": {
@@ -261,12 +264,12 @@
     "dryRuns": 50
   },
   "run_command": {
-    "hits": 278,
+    "hits": 326,
     "fails": {
       "spawnError": 0
     },
     "misses": {
-      "exitNonZero": 26,
+      "exitNonZero": 36,
       "timedOut": 0
     },
     "get_repo_map": {
@@ -277,7 +280,7 @@
     }
   },
   "get_repo_map": {
-    "hits": 34,
+    "hits": 42,
     "fails": {
       "noProject": 0
     }
@@ -370,7 +373,7 @@
       "noEditor": 0
     }
   },
-  "sessionCount": 12,
+  "sessionCount": 16,
   "set_selections": {
     "hits": 0,
     "fails": {
@@ -382,13 +385,13 @@
       "introduced": 0
     },
     "wrong_indentation": {
-      "introduced": 0
+      "introduced": 12
     },
     "dos_line_endings": {
       "introduced": 0
     },
     "missing_newline_eof": {
-      "introduced": 0
+      "introduced": 12
     },
     "trailing_blank_lines": {
       "introduced": 0
@@ -439,8 +442,8 @@
       "introduced": 0
     },
     "_cleanEdits": 0,
-    "_totalCHEdits": 0,
-    "_totalViolations": 0,
+    "_totalCHEdits": 12,
+    "_totalViolations": 24,
     "_checkpatchRuns": 1,
     "_checkpatchViolations": 0
   },

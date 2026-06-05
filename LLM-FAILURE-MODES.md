@@ -123,6 +123,16 @@ last-resort / human-provided path.
 
 ---
 
+### 8. Unicode character substitution in `old_str` (invisible byte mismatch)
+**What happens:** The LLM generates `old_str` that looks visually identical to the buffer content but contains Unicode substitutions — smart quotes instead of straight quotes, em dash instead of hyphen, non-breaking space instead of regular space, zero-width spaces, BOM characters. The bytes don't match; the tool returns noMatch with no whitespace explanation.
+
+**Why it's hard to debug:** The whitespace diff diagnostic does not fire (this isn't an indentation issue). The partial-match counter immediately hits zero if the mismatch is on the first character of `old_str`. The failure looks identical to a completely wrong `old_str`.
+
+**Current mitigation (v0.10.23):** Three-layer Unicode robustness suite — `fuzzyContent:true` (normalise both `old_str` and buffer to ASCII-equivalent before matching), `lineHintFallback` (blind positional replace when `lineHint` is set), `regex:true` (treat `old_str` as a `/gm` RegExp, use `.` to wildcard suspected Unicode chars). See S14 for full detail.
+
+
+---
+
 ## Proposed Improvements
 
 ### P1 — `occurrence: N` on `str_replace`
@@ -1185,3 +1195,64 @@ Neither is caught by the compiler or linter. Both pass all mechanical whitespace
 **Stats expectation:** The `replace-function-body` `notFound:10` in the v0.10.22 baseline snapshot (session 12) was entirely from the regex era. Post-migration sessions should show `notFound` approaching 0. `str_replace` `noMatch` and `whitespace` failures should also drop as better `functionHint` scoping reduces the search space.
 
 **Full tool audit passed:** All tools verified against `test/hal.c` and `test/test.c` in v0.10.22. `get-structural-anchors` scope bug (stale variable names from migration) was the only post-migration issue, fixed in v0.10.22.
+
+### S14 — Unicode mismatch in `old_str`: silent noMatch failures from invisible character substitution (v0.10.23)
+
+**Problem being solved:** A persistent class of `str_replace` `noMatch` failures had no whitespace explanation and no partial match — the tool reported no hit, but the text was visually correct. These failures were not surfaced by the existing whitespace diff diagnostics because the mismatch was not indentation: the actual characters in `old_str` differed from the buffer at the byte level. The LLM had no way to detect this from the failure response.
+
+**Root cause — how LLMs generate Unicode substitutions:** LLM tokenisers process text through byte-pair encoding. During generation, a model that "sees" a straight double quote `"` may produce a left or right smart quote (`"` U+201C / `"` U+201D) depending on the surrounding context — especially in natural-language fragments like comments, docstrings, or string literals that resemble prose. Similarly, an em dash (`—` U+2014) may appear in place of `--` or a hyphen, a non-breaking space (U+00A0) may replace a regular space inside formatted output, and zero-width spaces (U+200B) may be silently inserted at word boundaries. The buffer was written with straight ASCII characters; the LLM's `old_str` contained Unicode substitutions. The bytes did not match. The match failed. No error, no warning.
+
+**Character classes affected:**
+
+| LLM generates | Instead of | Unicode |
+|---|---|---|
+| Smart double quote `"` `"` | Straight `"` | U+201C / U+201D |
+| Smart single quote `'` | Straight `'` or apostrophe | U+2019 |
+| Em dash `—` | Hyphen-minus `-` or `--` | U+2014 |
+| En dash `–` | Hyphen-minus `-` | U+2013 |
+| Non-breaking space | Regular space | U+00A0 |
+| Zero-width space | Nothing (invisible) | U+200B |
+| Soft hyphen | Nothing (invisible) | U+00AD |
+| BOM | Nothing (file start) | U+FEFF |
+| Emoji / surrogate pairs | (varies) | U+D800–U+DFFF |
+
+**Why the existing diagnostics did not catch it:** The whitespace diff reporter (failure mode 2 mitigation) compares trimmed-per-line content — if trim() removes the mismatch, the diagnostic fires. Unicode substitutions inside a line are not trimmed and the diagnostic does not fire. The partial-match counter counts consecutive matching lines; a Unicode mismatch on line 1 of `old_str` immediately produces a 0-line partial match, which is indistinguishable from a completely wrong `old_str`.
+
+**Strategy implemented — three-layer Unicode robustness suite (v0.10.23):**
+
+**Stage 1 — `fuzzyContent:true` (normalisation-based matching):**
+Both `old_str` and the buffer search region are normalised to ASCII-equivalent before matching: BOM, zero-width/soft-hyphen stripped; NBSP → space; smart single/double quotes → straight; en/em dash → hyphen; surrogate pairs (emoji) → empty string. Match found on the normalised string; replacement slices from the **original** buffer at the discovered position — buffer content is preserved exactly, only the search is normalised. New stat: `fuzzyContentCommits` — counts how often this path saved a retry. Requires `fuzzyContent: true` in the tool call.
+
+**Stage 2 — `lineHintFallback` (position-based auto-rescue):**
+When exact match fails AND `lineHint` is set and in bounds, the handler falls back to a direct positional replace at the hint row — no content matching required. Designed for the case where the LLM knows the exact target line from a prior `grep-file` result but the buffer content contains unpredictable Unicode. The fallback replaces `old_str.split('\n').length` lines from `lineHint` with `new_str`. Success response tagged `[lineHintFallback]` to signal the caller. New stat: `lineHintFallback`. **Caution:** a wrong `lineHint` will silently corrupt — this path is encoding-agnostic by design, and the tag in the response is the only signal. Always confirm the line number from a `grep-file` result in the same session turn before relying on it.
+
+**Stage 3 — `regex:true` (pattern-based escape hatch):**
+Treats `old_str` as a JavaScript `/gm` regular expression. Use `.` to wildcard single problematic characters (em dash, smart quotes), `.*` for spans of uncertain content, `\*` for literal asterisk. Invalid patterns return a clean error with the JS error message. Success/dryRun responses tagged `[regex]`. New stat: `regexCommits`. When both `regex:true` AND `lineHint` are set and the regex finds no match, Layer 2 (`lineHintFallback`) fires — `lineHint` is the stronger signal. To force regex-only, omit `lineHint`.
+
+**Precedence and fallback chain:**
+```
+P1 (exact)        — try exact indexOf match in search window
+P2 (occurrence)   — apply occurrence:N selection to exact matches
+P3 (fuzzyWhitespace) — retry with per-line whitespace normalisation
+P4 (fuzzyContent) — retry with Unicode→ASCII normalisation [NEW]
+P5 (regex)        — treat old_str as /gm RegExp [NEW]
+Layer 2           — lineHintFallback blind positional replace [NEW]
+→ FAIL: no-match diagnostics + smartSuggestion
+```
+
+**Test coverage:** All six Unicode character classes confirmed passing against `test/fuzzy_content_test.c`: smart double quotes (U+201C/D), em dash (U+2014), en dash (U+2013), NBSP (U+00A0), smart single quote (U+2019), zero-width space (U+200B). All three paths confirmed working: match+commit, dryRun, invalid pattern error.
+
+**When to use each mode:**
+
+| Scenario | Recommended approach |
+|---|---|
+| Suspect smart quotes / em dashes in a string literal or comment | `fuzzyContent:true` |
+| Have a confirmed line number from grep-file, buffer content may differ | `lineHint:N` (triggers fallback automatically on mismatch) |
+| Know the pattern but not the exact Unicode chars | `regex:true` with `.` wildcards |
+| None of the above, hit has failed twice | `dryRun:true` with `regex:true` to see what matches |
+
+**Why this belongs in the tool layer:** An LLM cannot introspect the byte content of its own output. It generates text that looks visually correct, passes it to the tool, and has no mechanism to discover that a smart quote was substituted until the match fails. Prompt instructions like "always use straight quotes" are forgotten mid-session and not applied to content the LLM reconstructs from memory. Tool-level normalisation solves the problem without requiring the LLM to reason about Unicode at all.
+
+**Stats tracking:** Three new counters (`fuzzyContentCommits`, `lineHintFallback`, `regexCommits`) are tracked in `editStats.str_replace` alongside `fuzzyWhitespaceCommits`. All appear in `get-edit-stats` output. Over sessions, the ratio `fuzzyContentCommits / (noMatch + fuzzyContentCommits)` measures how often Unicode substitution is actually the failure cause — distinguishing it from whitespace mismatch and true content divergence.
+
+---
