@@ -9,7 +9,7 @@ the comparison shows where pulsar-edit-mcp-server is already ahead, and where ga
 - Exact string match only — `old_string` must appear **exactly once** in the file
 - If it appears more than once, Claude is expected to widen `old_string` with enough
   surrounding context to make it unique, or use `replace_all: true`
-- No `functionHint`, no `lineHint`, no `dryRun`, no failure diagnostics
+- No `functionHint`, no `lineNumberHint`, no `dryRun`, no failure diagnostics
 - No fuzzy matching, no partial-match reporting, no whitespace diff
 - Falls back to `write_to_file` (full rewrite) when `str_replace` fails repeatedly
 
@@ -25,7 +25,7 @@ the comparison shows where pulsar-edit-mcp-server is already ahead, and where ga
   problem across all models they support
 
 ### Summary
-Neither tool has `functionHint`, `lineHint`, `dryRun`, whitespace mismatch reporting,
+Neither tool has `functionHint`, `lineNumberHint`, `dryRun`, whitespace mismatch reporting,
 partial match counting, or fuzzy area location. The failure diagnostics and anchoring
 system in pulsar-edit-mcp-server are genuinely novel. The proposals below extend that
 lead further.
@@ -128,7 +128,7 @@ last-resort / human-provided path.
 
 **Why it's hard to debug:** The whitespace diff diagnostic does not fire (this isn't an indentation issue). The partial-match counter immediately hits zero if the mismatch is on the first character of `old_str`. The failure looks identical to a completely wrong `old_str`.
 
-**Current mitigation (v0.10.23):** Three-layer Unicode robustness suite — `fuzzyContent:true` (normalise both `old_str` and buffer to ASCII-equivalent before matching), `lineHintFallback` (blind positional replace when `lineHint` is set), `regex:true` (treat `old_str` as a `/gm` RegExp, use `.` to wildcard suspected Unicode chars). See S14 for full detail.
+**Current mitigation (v0.10.28):** Five-layer auto-retry pipeline — see S19. `fuzzyContent:true` normalises Unicode to ASCII before matching; `fuzzyWhitespace:true` matches trimmed-per-line content; `autoStripComment` strips trailing `/* */` or `//` comments hallucinated onto `old_str`'s last line. All three now fire **automatically** before returning a failure, requiring no explicit flag. `regex:true` is the manual escape hatch for unknown character patterns. `lineNumberHintFallback` was removed in v0.10.26 (see S15) — it caused silent corruption. `diffVsBuffer` char-level diff is now appended to every noMatch failure response when `lineNumberHint` is set (see S16).
 
 
 ---
@@ -155,9 +155,9 @@ str_replace({
 
 ### P2 — `afterHint` on `str_replace`
 **Fixes:** Duplicate pattern confusion when there's no function boundary (failure mode 4)  
-**Effort:** Low — same as `lineHint` but anchor is a content string not a line number  
+**Effort:** Low — same as `lineNumberHint` but anchor is a content string not a line number  
 **How:** Search for `afterHint` string in the buffer, find its line, then begin the
-`old_str` search from that point. Content-stable equivalent of `lineHint`.
+`old_str` search from that point. Content-stable equivalent of `lineNumberHint`.
 
 ```
 str_replace({
@@ -363,7 +363,7 @@ const editStats = {
     },
     hintsUsed: {
       functionHint:  0,    // existing
-      lineHint:      0,    // existing
+      lineNumberHint:      0,    // existing
       afterHint:     0,    // proposed P2
       betweenHint:   0,    // proposed P4
       occurrence:    0,    // proposed P1
@@ -473,7 +473,7 @@ to report what happened.
     "hits": 22, "failTotal": 4,
     "fails": { "whitespace": 3, "noMatch": 1, "partialMatch": 0,
                "outOfScope": 0, "afterNotFound": 0, "wrongOccurrence": 0 },
-    "hintsUsed": { "functionHint": 8, "lineHint": 2, "afterHint": 0,
+    "hintsUsed": { "functionHint": 8, "lineNumberHint": 2, "afterHint": 0,
                    "betweenHint": 0, "occurrence": 0 },
     "fuzzyWhitespaceCommits": 0,
     "dryRunsBeforeCommit": 5,
@@ -863,7 +863,7 @@ Together they create a reinforcement loop within a session.
 ### S3 — Schema/handler uniformity: hints must be in inputSchema to be usable
 
 **Problem being solved:** A schema mismatch was found where `delete-line-range` had
-`dryRun`, `functionHint`, `afterHint`, `lineHint`, `betweenHint`, `occurrence`, and
+`dryRun`, `functionHint`, `afterHint`, `lineNumberHint`, `betweenHint`, `occurrence`, and
 `fuzzyWhitespace` fully implemented in its handler, but **none** of them were declared
 in `inputSchema`. The LLM could never pass these parameters — they were silently dropped
 by the Zod validator before the handler received them.
@@ -911,7 +911,7 @@ added that anchor by content rather than position:
 - `betweenHint` — lines between two anchor strings
 - `centerLine`+`radius` — window around a specific line (useful when the line number
   is known from a prior tool response in the same turn)
-- `lineHint` — alias for `centerLine` with radius defaulting to 10
+- `lineNumberHint` — alias for `centerLine` with radius defaulting to 10
 
 This makes `read-lines` content-stable by default — the LLM can ask for "the body of
 `handleAuth`" rather than "lines 247–298".
@@ -1180,7 +1180,7 @@ Neither is caught by the compiler or linter. Both pass all mechanical whitespace
 
 - `getSymbolsFromEditor(editor)` — tree-sitter via `rootLanguageLayer.tree` + `tagsQuery`. Walks `definition.*` + `name` captures. `endRow` from `node.endPosition.row` — exact, no brace-counting.
 - `getSymbolsFromText(text, filePath)` — regex fallback (`C_FN_RE`, `JS_FN_RE`, `REGISTER_TOOL_RE`) for closed files or unsupported grammars. Used by `naming-checker.js` and `list-project-functions`.
-- `findFunction(symbols, name, hints)` — filters by name + `occurrence`/`lineHint`/`afterRow`/`betweenRows` hints. Ambiguity returned as a structured result, not silently resolved.
+- `findFunction(symbols, name, hints)` — filters by name + `occurrence`/`lineNumberHint`/`afterRow`/`betweenRows` hints. Ambiguity returned as a structured result, not silently resolved.
 - `resolveAnchor(hint, symbols, text)` — three-stage resolution: (1) exact symbol name → `sym.endRow` [symbolEnd], (2) pure integer → lineNumber, (3) `text.indexOf` scan with uniqueness check. Ambiguity fires at both symbol and string level, returns `{row, via, ambiguous?, matches?}`.
 
 **Key behaviour changes visible to the LLM:**
@@ -1223,21 +1223,21 @@ Neither is caught by the compiler or linter. Both pass all mechanical whitespace
 **Stage 1 — `fuzzyContent:true` (normalisation-based matching):**
 Both `old_str` and the buffer search region are normalised to ASCII-equivalent before matching: BOM, zero-width/soft-hyphen stripped; NBSP → space; smart single/double quotes → straight; en/em dash → hyphen; surrogate pairs (emoji) → empty string. Match found on the normalised string; replacement slices from the **original** buffer at the discovered position — buffer content is preserved exactly, only the search is normalised. New stat: `fuzzyContentCommits` — counts how often this path saved a retry. Requires `fuzzyContent: true` in the tool call.
 
-**Stage 2 — `lineHintFallback` (position-based auto-rescue):**
-When exact match fails AND `lineHint` is set and in bounds, the handler falls back to a direct positional replace at the hint row — no content matching required. Designed for the case where the LLM knows the exact target line from a prior `grep-file` result but the buffer content contains unpredictable Unicode. The fallback replaces `old_str.split('\n').length` lines from `lineHint` with `new_str`. Success response tagged `[lineHintFallback]` to signal the caller. New stat: `lineHintFallback`. **Caution:** a wrong `lineHint` will silently corrupt — this path is encoding-agnostic by design, and the tag in the response is the only signal. Always confirm the line number from a `grep-file` result in the same session turn before relying on it.
+**Stage 2 — `lineNumberHintFallback` (position-based auto-rescue):**
+When exact match fails AND `lineNumberHint` is set and in bounds, the handler falls back to a direct positional replace at the hint row — no content matching required. Designed for the case where the LLM knows the exact target line from a prior `grep-file` result but the buffer content contains unpredictable Unicode. The fallback replaces `old_str.split('\n').length` lines from `lineNumberHint` with `new_str`. Success response tagged `[lineNumberHintFallback]` to signal the caller. New stat: `lineNumberHintFallback`. **Caution:** a wrong `lineNumberHint` will silently corrupt — this path is encoding-agnostic by design, and the tag in the response is the only signal. Always confirm the line number from a `grep-file` result in the same session turn before relying on it.
 
 **Stage 3 — `regex:true` (pattern-based escape hatch):**
-Treats `old_str` as a JavaScript `/gm` regular expression. Use `.` to wildcard single problematic characters (em dash, smart quotes), `.*` for spans of uncertain content, `\*` for literal asterisk. Invalid patterns return a clean error with the JS error message. Success/dryRun responses tagged `[regex]`. New stat: `regexCommits`. When both `regex:true` AND `lineHint` are set and the regex finds no match, Layer 2 (`lineHintFallback`) fires — `lineHint` is the stronger signal. To force regex-only, omit `lineHint`.
+Treats `old_str` as a JavaScript `/gm` regular expression. Use `.` to wildcard single problematic characters (em dash, smart quotes), `.*` for spans of uncertain content, `\*` for literal asterisk. Invalid patterns return a clean error with the JS error message. Success/dryRun responses tagged `[regex]`. New stat: `regexCommits`. When both `regex:true` AND `lineNumberHint` are set and the regex finds no match, Layer 2 (`lineNumberHintFallback`) fires — `lineNumberHint` is the stronger signal. To force regex-only, omit `lineNumberHint`.
 
 **Precedence and fallback chain:**
 ```
-P1 (exact)        — try exact indexOf match in search window
-P2 (occurrence)   — apply occurrence:N selection to exact matches
-P3 (fuzzyWhitespace) — retry with per-line whitespace normalisation
-P4 (fuzzyContent) — retry with Unicode→ASCII normalisation [NEW]
-P5 (regex)        — treat old_str as /gm RegExp [NEW]
-Layer 2           — lineHintFallback blind positional replace [NEW]
-→ FAIL: no-match diagnostics + smartSuggestion
+P1 (exact)             -- try exact indexOf match in search window
+P2 (occurrence)        -- apply occurrence:N selection to exact matches
+P3 (fuzzyWhitespace)   -- retry with per-line whitespace normalisation (explicit OR auto v0.10.28)
+P4 (fuzzyContent)      -- retry with Unicode->ASCII normalisation (explicit OR auto v0.10.28)
+P4b (autoStripComment) -- strip trailing /* */ or // from old_str last line, retry (auto v0.10.28)
+P5 (regex)             -- treat old_str as /gm RegExp [explicit only]
+-> FAIL: diffVsBuffer char diff + Levenshtein similarity% + smartSuggestion + failure-log.ndjson
 ```
 
 **Test coverage:** All six Unicode character classes confirmed passing against `test/fuzzy_content_test.c`: smart double quotes (U+201C/D), em dash (U+2014), en dash (U+2013), NBSP (U+00A0), smart single quote (U+2019), zero-width space (U+200B). All three paths confirmed working: match+commit, dryRun, invalid pattern error.
@@ -1247,12 +1247,205 @@ Layer 2           — lineHintFallback blind positional replace [NEW]
 | Scenario | Recommended approach |
 |---|---|
 | Suspect smart quotes / em dashes in a string literal or comment | `fuzzyContent:true` |
-| Have a confirmed line number from grep-file, buffer content may differ | `lineHint:N` (triggers fallback automatically on mismatch) |
+| Have a confirmed line number from grep-file, buffer content may differ | `lineNumberHint:N` (triggers fallback automatically on mismatch) |
 | Know the pattern but not the exact Unicode chars | `regex:true` with `.` wildcards |
 | None of the above, hit has failed twice | `dryRun:true` with `regex:true` to see what matches |
 
 **Why this belongs in the tool layer:** An LLM cannot introspect the byte content of its own output. It generates text that looks visually correct, passes it to the tool, and has no mechanism to discover that a smart quote was substituted until the match fails. Prompt instructions like "always use straight quotes" are forgotten mid-session and not applied to content the LLM reconstructs from memory. Tool-level normalisation solves the problem without requiring the LLM to reason about Unicode at all.
 
-**Stats tracking:** Three new counters (`fuzzyContentCommits`, `lineHintFallback`, `regexCommits`) are tracked in `editStats.str_replace` alongside `fuzzyWhitespaceCommits`. All appear in `get-edit-stats` output. Over sessions, the ratio `fuzzyContentCommits / (noMatch + fuzzyContentCommits)` measures how often Unicode substitution is actually the failure cause — distinguishing it from whitespace mismatch and true content divergence.
+**Stats tracking:** Three new counters (`fuzzyContentCommits`, `lineNumberHintFallback`, `regexCommits`) are tracked in `editStats.str_replace` alongside `fuzzyWhitespaceCommits`. All appear in `get-edit-stats` output. Over sessions, the ratio `fuzzyContentCommits / (noMatch + fuzzyContentCommits)` measures how often Unicode substitution is actually the failure cause — distinguishing it from whitespace mismatch and true content divergence.
+
+---
+
+### S15 -- `lineNumberHintFallback` removed: correct failure over silent corruption (v0.10.26+)
+
+**Problem being solved:** `lineNumberHintFallback` was a positional overwrite that fired whenever `lineNumberHint` was set and `old_str` didn't match the buffer. It replaced `old_str.split('\n').length` lines at the hint row regardless of content. This produced **218 silent positional overwrites** in lifetime stats (tracked as `lineNumberHintFallback: 218`). The stat name obscured the severity -- each was a case where the wrong content was written to the file without the LLM knowing.
+
+**Why it was dangerous:** The fallback was encoding-agnostic by design. If the LLM's `lineNumberHint` was off by one, or the file had shifted since the last read, the wrong region was overwritten. The `[lineNumberHintFallback]` tag in the success response was the only signal -- and a success response does not prompt verification. In practice the LLM treated it as a normal commit.
+
+**What `lineNumberHint` now does:** Narrows the search *window* forward from the specified line (`±50` rows via `LINE_HINT_RADIUS`). If `old_str` is found in that window, it matches normally. If not, the tool fails with the standard noMatch diagnostics (`diffVsBuffer`, closest-area scan, whitespace analysis). Correct failure every time -- never silent corruption.
+
+**Stats consequence:** The `lineNumberHintFallback: 218` counter has been removed from the stats schema. Those 218 calls were incorrect writes. Post-removal, `noMatch` will increase slightly as previously-rescued (but wrong) calls now fail correctly.
+
+**Rule:** `lineNumberHint` is a search-narrowing hint, not a position anchor. It makes the search faster and more accurate; it does not bypass content matching.
+
+---
+
+### S16 -- `failure-log.ndjson` and `diffVsBuffer`: the evidence base that drove tool redesign (v0.10.26+)
+
+**Why the log exists:** Every tool design change from S17 onward was driven by data in `failure-log.ndjson`, not by intuition. Without the log, failures were invisible after they occurred -- the LLM moved on, the session ended, and the failure pattern was never analysed. The log makes failures permanent, grep-queryable, and structured enough to reveal systematic causes.
+
+**What the log captures:** Every `str_replace` noMatch, whitespace, or partialMatch failure is appended as an NDJSON record (one JSON object per line, zero deps via `fs.appendFileSync`):
+
+```json
+{
+  "ts": "2026-06-07T11:04:58Z",
+  "tool": "str_replace",
+  "reason": "noMatch",
+  "filePath": "lib/mcp-registration.js",
+  "lineNumberHint": 1375,
+  "hintsSet": ["lineHint"],
+  "oldStrPreview": "  .replace(/[\\u2013\\u2014]/g, '-')   // en/em dash -> hyphen",
+  "diffVsBuffer": "  old[1]: \"  .replace(/[\\\\u2013\\\\u2014]/g, '-')   // en/em dash -> hyphen\"\n  buf[1]: \"  .replace(/[\\\\u2013\\\\u2014]/g, '-')   // en/em dash \u00e2\u0081\u00a2 hyphen\""
+}
+```
+
+The `diffVsBuffer` field shows up to 4 lines of `old_str` vs the actual buffer content at `lineNumberHint`, side-by-side. The log path is reported in `get-edit-stats` output as `failureLogPath`.
+
+**How specific log entries drove specific design changes:**
+
+*Entry class 1 -- Arrow substitution cluster (June 7, multiple entries on mcp-registration.js):*
+The log showed a repeating pattern: `old_str` contained `-> ` (ASCII arrow) while the buffer had `\u2192` (Unicode rightwards arrow). The `diffVsBuffer` field made it machine-readable for the first time -- previously these failures looked identical to any other noMatch. This cluster directly motivated adding `[\u2190-\u21FF] -> '->'` arrow normalisation to the `fuzzyContent` path (S18), and later the auto-fuzzyContent retry (S19) so no explicit flag was needed.
+
+*Entry class 2 -- Trailing comment hallucination (June 7, test/test.c):*
+```
+"oldStrPreview": "int hal_wifi_disconnect(void) /* verified */"
+"diffVsBuffer":  "buf[1]: \"int hal_wifi_disconnect(void)\""
+```
+The buffer line had no trailing comment; `old_str` had one. The diff made the cause immediately obvious -- the LLM had hallucinated `/* verified */` from a different file version or from training data. Seeing this pattern in the log across multiple files motivated the `autoStripComment` auto-retry (S19): strip the trailing comment, match the prefix, salvage the comment as `/* CHECK: ... */` in the output.
+
+*Entry class 3 -- lineHint pointing at wrong region (June 7 and June 8, mcp-registration.js):*
+```
+"oldStrPreview": "filePath: z.string().optional().describe(\"Path to the .c/.h file...\")"
+"diffVsBuffer":  "buf[1]: \"      },\""
+```
+The `lineNumberHint` was 40+ lines off -- pointing at the end of a previous block rather than the target handler. The log revealed that stale line numbers were causing the diff to compare completely unrelated content. This confirmed that `lineNumberHint` as a positional anchor was inherently unsafe and motivated the `lineNumberHintFallback` removal (S15) -- a fallback that was silently overwriting the wrong lines when the hint was off.
+
+*Entry class 4 -- Backslash escaping mismatch in old_str (June 8, session-notes.json):*
+```
+"oldStrPreview": "\\\\nSTR_REPLACE TIMEOUT NOTE..."
+"diffVsBuffer":  "old[1]: \"\\\\\\\\nSTR_REPLACE TIMEOUT NOTE...\"\n  buf[1]: \"    \\\"note\\\": \\\"SESSION 2026-06-08...\""
+```
+The LLM had escaped backslashes one level too few when constructing `old_str` for a JSON file. The diff showed the escaping difference directly. This class of failure -- not Unicode, not whitespace, but wrong escaping level -- is now visible in the log and can be distinguished from other noMatch causes.
+
+*Entry class 5 -- partialMatch with no diffVsBuffer (June 8-9, no lineNumberHint set):*
+Multiple entries show `"lineNumberHint": null, "diffVsBuffer": null`. These are failures where no hint was set, so the tool had no anchor for the diff. This pattern in the log was the evidence for adding the "NO HINTS USED" section of `smartSuggestion` -- if the LLM had used `lineNumberHint`, it would have gotten a diff; instead it got a blank.
+
+**How to query the log:**
+
+```powershell
+# All noMatch failures on mcp-registration.js
+Get-Content failure-log.ndjson | ConvertFrom-Json | Where-Object { $_.reason -eq "noMatch" -and $_.filePath -like "*mcp-registration*" }
+
+# Failures with no hints set (no diff available)
+Get-Content failure-log.ndjson | ConvertFrom-Json | Where-Object { $_.hintsSet.Count -eq 0 }
+
+# Arrow substitution failures (buf contains Unicode arrow)
+Select-String "\u2192|\u2190" failure-log.ndjson
+```
+
+**The design principle the log established:** Every systematic failure class that appears 3+ times in the log with a recognisable pattern becomes a candidate for automatic rescue. The log converts anecdotal failure reports ("it keeps failing on arrow lines") into a measurable signal ("47 entries in 6 sessions, all with buf containing \u2192 where old_str had ->"). That signal is what justifies the engineering cost of each auto-retry block.
+
+**Scope:** Currently wired to `str_replace` noMatch/whitespace/partialMatch. Extension to `insert` anchorNotFound and `replace-function-body` notFound is in the TODO list -- those failure classes are currently invisible in the log.
+
+---
+
+### S17 -- Post-edit structural integrity: `lib/struct-check.js` delta check (v0.10.25)
+
+**Problem being solved:** LLM edits can introduce structural damage that is invisible to the linter and compiler until the file is further modified -- an unclosed `{`, an unclosed `/* block comment`, or an unmatched `#if`. These errors cascade: edit N+1 fails on a corrupted baseline with a confusing error that has nothing to do with what it tried to change. Without a post-edit check the LLM has no signal that edit N caused the problem.
+
+**Why the linter is insufficient:** `linter-bundle` checks language semantics. An unclosed `{` at the end of a function body may still parse if the token stream is valid up to that point. Block comment errors and `#if` depth are pre-processor issues that linters typically don't track.
+
+**Strategy implemented:** `lib/struct-check.js` exposes two functions:
+- `snapshot(text)` -- returns `{ braces: net, comments: unclosed, ifdepth: net }` in one text scan.
+- `delta(before, after)` -- returns a warning string (or `''`) only when a metric got *worse* after the edit. Pre-existing imbalances are silently ignored -- the delta check reports what *you* broke, not what was already broken.
+
+`preEditSnapshot(editor)` and `postEditDelta(pre, editor)` in `edit-response.js` call these before and after the buffer write. The `struct` warning is routed through `buildEditResponse()` alongside `style` and `lint`. Currently wired to `str_replace`; extending to all 15 commit sites is in progress.
+
+**Three metrics tracked:**
+- **Brace balance** -- net `{` minus `}` in the changed region. Catches unclosed function bodies and forgotten closing braces.
+- **Block comment balance** -- unclosed `/*` without `*/`. Catches LLM-generated comments that eat the rest of the file.
+- **`#if` depth** -- net `#if`/`#ifdef`/`#ifndef` minus `#endif`. Catches conditional compilation blocks left open.
+
+**Delta-only design:** Absolute imbalances in the file before the edit are ignored. Only *newly introduced* imbalances trigger a warning. This prevents noise on files that already have known imbalances (e.g. generated or partial-translation files).
+
+**File type gate:** `STRUCT_EXTENSIONS` regex covers `.c .h .js .ts .jsx .tsx .css .scss .java .cs .go .rs .swift`. Struct checks do not fire on Markdown, JSON, or other non-brace files.
+
+**Companion tool -- `check-struct`** (debugging group): on-demand absolute snapshot of the current file state. Unlike the delta check (which only fires on edits), `check-struct` reports the raw absolute counts. Use at session start to understand the baseline, or when `fuzzyWhitespace` behaves unexpectedly (mixed indentation is often co-located with struct imbalances from earlier sessions).
+
+---
+
+### S18 -- `fuzzyContent` accuracy fixes and box-drawing normalisation (v0.10.26+)
+
+**Problem being solved (position overshoot):** The `fuzzyContent` normalisation path found a match position `idx` in the normalised string, then sliced `effectiveOldStr` from the *original* buffer using `idx + effectiveOldStr.length`. Because normalisation removes chars (BOM, zero-width spaces, surrogates), `normNeedle.length < effectiveOldStr.length`. The slice overshot, capturing extra trailing characters, and the wrong region was replaced.
+
+**Fix:** Walk the original buffer forward char-by-char from `idx`, accumulating normalised character lengths until `consumed >= normNeedle.length`, then slice `[idx..srcIdx]`. Correctly handles all non-length-preserving normalisation cases.
+
+**Problem being solved (matchIndex not set):** After finding a normalised match, `fuzzyContent` updated `effectiveOldStr` but did not set `matchIndex` or `matchLine`. The code fell through to the downstream `indexOf` loop which re-searched on the *raw* buffer, failing for emoji/surrogate pairs (JS `indexOf` is by UTF-16 code unit, not grapheme). Fixed: immediately set `matchIndex`, `matchLine`, and `occurrencesFound = occurrence` after the normalised match, causing the downstream loop to skip.
+
+**Box-drawing normalisation added:** Runs of Unicode box-drawing chars (`[\u2500-\u257F]`, e.g. `-- text ---`) collapse to `'--'` during normalisation. LLM can write `// -- text --` and match `// -- lineNumberHint ambiguity guard ----...` regardless of dash count or character mix. Useful for section headers generated with varying ruler lengths.
+
+**`regex:true` vs `fuzzyContent:true` -- clarified decision rule:**
+- `fuzzyContent:true` -- passive normalisation for *known* encoding variants (smart quotes, NBSP, en/em dashes, box-drawing). Use when the LLM writes an ASCII approximation of a character it cannot reproduce exactly.
+- `regex:true` -- active pattern for *unknown or variable* unicode content (emoji, box-drawing runs, backtick spans). LLM writes a pattern with `.` wildcards. More explicit than `fuzzyContent`, needed when the character type itself is unknown.
+
+**Smart suggestion updated** to distinguish the two modes and include example patterns for `regex:true`.
+
+---
+
+### S19 -- Auto-retry pipeline: fuzzyWhitespace, fuzzyContent, autoStripComment fire without explicit flags (v0.10.28)
+
+**Problem being solved:** The three most common str_replace failure causes -- whitespace mismatch, Unicode substitution, and hallucinated trailing comments -- each required the LLM to receive a failure response, diagnose the cause, add the appropriate flag (`fuzzyWhitespace:true`, `fuzzyContent:true`), and retry. That is one wasted tool call per failure class, every time.
+
+**Why the flags existed but the auto-retry didn't:** The flags were added incrementally as the failure classes were discovered. Each was opt-in because at the time there was concern that automatic normalisation might match the wrong site in edge cases. After lifetime stats showed these three failure classes accounting for the vast majority of `noMatch` failures, the risk calculus changed: an automatic rescue that occasionally produces a false-positive match is safer than a guaranteed failed call that the LLM then misdiagnoses.
+
+**Strategy implemented (v0.10.28):** Three sequential auto-retry blocks inserted between the `fuzzyWhitespace:true` explicit path and the `noMatch` failure path:
+
+1. **Auto-fuzzyWhitespace** -- fires when `matchIndex === -1` AND `fuzzyWhitespace` was not explicitly set AND not regex mode. Runs the existing trim-per-line scan. On match: sets `fuzzyWhitespace = true`, `autoFuzzyWhitespace = true`, bumps `hintsUsed.fuzzyWhitespace` and `fuzzyWhitespaceCommits`. Tagged `[autoFuzzyWhitespace]` (vs `[fuzzyWhitespace]` for explicit). Eliminates ~66 lifetime whitespace faults per session.
+
+2. **Auto-fuzzyContent** -- fires when still no match after whitespace retry AND `fuzzyContent` not explicitly set. Runs Unicode normalisation (arrows `[\u2190-\u21FF]` -> `'->'` is the key addition vs the explicit path -- the explicit fuzzyContent path did NOT previously normalise arrows). On match: `autoFuzzyContent = true`, bumps `fuzzyContentCommits`. Tagged `[autoFuzzyContent]`. Eliminates the recurring en-dash/arrow encoding cluster.
+
+3. **Auto-autoStripComment** -- fires when still no match AND not regex. Checks if the last line of `old_str` has a trailing `/* ... */` or `// ...` comment absent from the buffer (the LLM hallucinated it or read it from a different file version). Strips the comment, retries. On match: appends `/* CHECK: <comment> */` to the last line of `new_str` (only if `new_str` doesn't already have a trailing comment), so the salvaged comment is visible for review. Tagged `[autoStripComment]`. New stat: `autoStripCommentCommits`.
+
+**Why conservative scope:** Auto-strip only fires on the last line of `old_str`, and only for single-line trailing comments. Multi-line blocks with comments on every line are not auto-stripped -- the risk of mangling is higher and the pattern is rarer.
+
+**Stats:** Three dedicated counters -- `fuzzyWhitespaceCommits` (now counts both explicit and auto), `fuzzyContentCommits` (same), `autoStripCommentCommits` (auto-strip only, new). `get-edit-stats` shows all three. The `[autoX]` vs `[X]` tag distinction lets the LLM see post-hoc whether a call needed a flag it didn't supply.
+
+---
+
+### S20 -- `[trailing-comments xN]` and `[check-me xN]`: health warnings that warn before str_replace fails (v0.10.28)
+
+**Problem being solved:** Two classes of str_replace `old_str` failure are predictable from static file inspection before any edit is attempted:
+
+1. Files with many inline trailing comments (e.g. `mcp-registration.js` has 110) -- the LLM frequently omits or hallucinate these when reconstructing `old_str` from memory, causing `noMatch`. The auto-retry (S19) rescues them, but the LLM had no advance warning.
+
+2. Files with `/* CHECK: ... */` markers left by a prior `autoStripComment` rescue -- these represent salvaged comments that need human verification and removal before the next edit on that line.
+
+**Strategy implemented:** Two new flags appended to the `get-repo-map` file health warnings block:
+
+- `[trailing-comments xN]` -- count of lines with inline `/* */` or `//` trailing comments. Regex: `\S.*(?:\/\/[^\n]*|\/\*.*?\*\/)\s*$` per file. The LLM sees this in the repo map and knows: "this file's `old_str` calls are likely to need autoStripComment rescue -- consider including or explicitly omitting the trailing comment."
+- `[check-me xN]` -- count of `/* CHECK:` occurrences. Each is a salvaged trailing comment from a prior `autoStripComment` rescue awaiting review. The LLM should `grep-file` for `CHECK:` at session start and resolve them before making further edits on those lines.
+
+**Why in the repo map:** The health warnings appear at the end of every `get-repo-map` response alongside `[unicode]`, `[crlf]`, `[mojibake]`. The LLM reads the repo map at session start (per session notes policy), so these flags arrive before any edit is attempted -- not after the first failure.
+
+**Tool description update:** The `get-repo-map` tool description was updated to explain both flags. The `[trailing-comments]` description explicitly notes that `autoStripComment` rescue handles them automatically, so the LLM knows it is protected even if it omits a trailing comment.
+
+---
+
+### S21 -- Levenshtein similarity % and nearest-symbol suggestion on noMatch failures (v0.10.27)
+
+**Problem being solved:** When `str_replace` failed with `noMatch`, the LLM received a closest-area snippet and a whitespace diff. But it had no quantified signal about *how close* the match was -- 90% similar (likely whitespace drift or one stale line) looks identical to 30% similar (completely wrong location) in a raw snippet. For `anchorError` failures on `afterHint`/`betweenHint`, the LLM also had no way to recover a misspelled symbol name without a full symbol list read.
+
+**Strategy implemented (v0.10.27):**
+
+1. **Levenshtein similarity % on str_replace noMatch** -- when `old_str` has >= 2 lines and a closest-area is found, `calculateSimilarity(old_str, bufferSlice)` is computed and appended: `"📊 Similarity: 87% -- Content is close -- likely whitespace drift. Try fuzzyWhitespace:true or re-read that region."` Three threshold bands: >=80% whitespace/encoding drift (use a fuzzy flag), 50-79% stale content (re-read then retry), <50% wrong location (use a hint to scope the search). Implemented via two-row DP Levenshtein in `lib/string-utils.js`.
+
+2. **Nearest-symbol suggestion on anchor noMatch** -- `anchorError()` accepts an optional 4th arg `symbols`. When a `betweenHint.start`, `betweenHint.end`, or `afterHint` anchor fails to resolve AND the hint looks like a symbol name (`/^\w+$/`), the full symbols array is scanned for the best Levenshtein match >= 60%. If found: `"💡 Nearest symbol: hal_wifi_scan (87% match)"` is appended. Turns a dead-end failure into a one-step correction -- the LLM replaces the misspelled hint with the suggested name and retries.
+
+**Stats angle:** The similarity % bands are calibrated from lifetime stats: the whitespace failure class (`fuzzyWhitespaceCommits: 66`) clusters around 85-95% similarity; true wrong-location failures cluster under 40%. The band thresholds reflect observed data, not intuition.
+
+---
+
+### S22 -- `lineContentHint` and `successNudge` lineHint upgrade suggestion (v0.10.27)
+
+**Problem being solved:** Lifetime stats showed `lineHint` (later renamed `lineNumberHint`) used 1328 times vs `afterHint` 46 times and `functionHint` 42 times. `lineNumberHint` is the weakest hint -- it is positional and drifts whenever a prior edit shifts lines. The LLM reached for it habitually because line numbers were immediately available from `grep-file` output, even though `afterHint` with a content string from the same line would have been drift-immune.
+
+**Two changes implemented (v0.10.27):**
+
+1. **`lineContentHint` param** -- accepts a unique string on the target line rather than a line number. Searches `allLines.findIndex(l => l.includes(hint))`. Content-stable, drift-immune. Bumps `hintsUsed.lineHint` bucket (same counter -- it is semantically equivalent to `lineNumberHint` but content-addressed). Added to `str_replace` `inputSchema` and tool description decision ladder as step 4b.
+
+2. **`successNudge` lineHint upgrade** -- when `str_replace` commits successfully using `lineNumberHint` (or `lineContentHint`) as the *only* hint on a file >= 100 lines, the success response appends: `"⚡ lineNumberHint is positional and drifts if lines are inserted above it. Next time use afterHint:\"<content>\" instead -- it's content-stable and won't drift."` The anchor string is extracted from `allLines[matchLine]` at commit time -- the suggestion is immediately usable, not generic advice. This closes the feedback loop before the next call rather than waiting for a failure.
+
+**Why both were needed:** `lineContentHint` solves the immediate call. The `successNudge` trains the pattern for subsequent calls in the same session. Together they progressively migrate the LLM away from positional hints toward content-stable ones within a single session.
 
 ---

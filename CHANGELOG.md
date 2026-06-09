@@ -1,3 +1,239 @@
+## 0.10.28
+
+### Enhancements
+
+- **`str_replace` auto-retry on whitespace mismatch** — when `old_str` fails to match due to indentation differences and `fuzzyWhitespace` was not explicitly set, the tool now automatically retries with fuzzy whitespace matching. On success the response is tagged `[autoFuzzyWhitespace]` instead of returning a fault. Eliminates the most common class of str_replace failures (~66 lifetime faults).
+
+- **`str_replace` auto-retry on Unicode mismatch** — when `old_str` fails after the whitespace retry and `fuzzyContent` was not explicitly set, the tool automatically retries with Unicode normalisation (arrows, smart-quotes, BOM, zero-width chars, box-drawing runs). On success tagged `[autoFuzzyContent]`. Eliminates the recurring `→` arrow encoding failure cluster.
+
+- Both auto-retries are fully transparent: stats (`fuzzyWhitespaceCommits`, `fuzzyContentCommits`) are bumped as if the flag had been set explicitly, and the response tag distinguishes auto (`autoFuzzyWhitespace`) from explicit (`fuzzyWhitespace`).
+
+- **`str_replace` auto-retry on trailing comment mismatch** — when `old_str` still fails after the whitespace and Unicode retries, the tool now checks whether the last line of `old_str` has a trailing `/* */` or `//` comment that is absent from the buffer. If so, it strips the comment, retries the match, and on success appends the salvaged comment to `new_str`'s last line as `/* CHECK: <comment> */` so it isn't silently lost. Tagged `[autoStripComment]`. Handles the common LLM hallucination of adding `/* verified */` or similar annotations to `old_str`.
+
+- **`autoStripCommentCommits` stat counter** — tracks how many `str_replace` commits were rescued by the trailing-comment strip auto-retry. Visible in `get-edit-stats` output alongside `fuzzyWhitespaceCommits` and `fuzzyContentCommits`.
+
+- **`[check-me xN]` health warning in `get-repo-map`** — files containing `/* CHECK: ... */` markers left by `autoStripComment` rescues are now flagged in the repo map health warnings section. Each marker represents a salvaged trailing comment that needs human verification. The LLM sees the count per file and knows to inspect and resolve them.
+
+### Bugs fixed
+
+- **`fuzzyWhitespaceCommits` not bumped on auto-retry** — the auto-retry whitespace block bumped `hintsUsed.fuzzyWhitespace` but missed `fuzzyWhitespaceCommits`, making auto-rescues invisible in the commits counter. Fixed.
+
+- **Duplicate `_oldStrLenSum` reset in stats reset loops** — both the session-flush and lifetime-reset loops contained two identical `_oldStrLenSum = 0` guards with a stale `lineNumberHintAssisted` reset sandwiched between them (dead counter, removed in a prior session). Deduplicated both loops and added the missing `fuzzyContentCommits` and `autoStripCommentCommits` reset guards.
+
+## 0.10.27
+
+### Bugs fixed
+
+- **`replace-function-body` crashed universally** — handler destructured `name` from args but `name` was never in the Zod inputSchema, so it was always `undefined`. `findFunction(symbols, undefined)` called `.toLowerCase()` on `undefined` and threw before any stats were recorded. Fixed by deriving `_fnName` from the first line of `newBody` (the function signature) with a regex, falling back to `functionHint` if the parse fails.
+
+- **`str_replace` session hits always 0** — `bump('str_replace', 'hits')` was missing from the commit path entirely. Added immediately after `strReplFailures.count = 0`.
+
+- **`replace-all` and `replace-document` missing bump hits/dryRuns** — neither tool called `bump('X', 'hits')` on commit or `bump('X', 'dryRuns')` on dryRun path. Fixed at both commit sites.
+
+- **Most edit tools missing bump hits** — after the universal bump() refactor, `insert`, `delete-line-range`, `delete-block`, `sed`, `apply-patch`, `replace-block`, `replace-across-files` all had no `bump('X', 'hits')` at their success points. Added to all.
+
+- **`$1`/`$2` capture-group backreferences silently broken** in `replace-all`, `replace-across-files`, and `sed` — arrow-function callbacks `() => replacement` bypass JS native `$N` interpolation in `String.replace()`. Added `applyReplacement(rep, m, groups, pre, post)` helper at module scope handling `$1`.`$9`, `$&`, `` $` ``, `$'`. Fixed all 4 call sites.
+
+- **`str_replace` noMatch path returned empty MCP response** — the return object had no `content` key, so the LLM received a silent empty result. Added `content: [{ type: 'text', text: parts.join('\n') }]` as first key in the noMatch return.
+
+- **`fuzzyContent` position overshoot** — after a normalised match, `effectiveOldStr` was sliced using `idx + effectiveOldStr.length` in the *normalised* string but `idx` was in the original buffer. Normalisation removes chars so the slice overshot. Fixed: walk the original buffer forward char-by-char accumulating normalised lengths until `>= normNeedle.length`.
+
+- **`fuzzyContent` didn't set `matchIndex`/`matchLine`** — after finding a position via normalised search, the code fell through to the downstream `indexOf` loop which re-searched on raw buffer and failed for emoji/surrogates. Fixed: set `matchIndex`, `matchLine`, `occurrencesFound = occurrence` immediately after the normalised match.
+
+- **`lineNumberHintFallback` removed** — was silently overwriting whatever happened to be at the lineNumberHint position when `old_str` didn't match, producing 218 silent positional overwrites in lifetime stats. `lineNumberHint` now narrows the search window forward from that line; if the string isn't found it fails with full diagnostics.
+
+- **`wrongOccurrence` diagnostic fired in regex mode** — the `indexOf`-based occurrence scan ran even when `regex:true`, reporting garbage line numbers. Added `if (regex)` early-return with a clean "pattern only matched N time(s)" message.
+
+- **Smart suggestion `if (sugg) parts.push(sugg)` dropped** — this line was accidentally removed during TOOL_CATALOGUE cleanup (duplicate-entry removal session). Consecutive-failure nudges were silently suppressed in all noMatch responses. Restored.
+
+- **`get-structural-anchors` only detected 3-line `/* ===...=== */` banners** — single-line banners like `/* ---- Wi-Fi ---- */` were not detected. Extended loop to check `_slm = line.match(/^\/\*\s*[-=]{3,}\s+(.+?)\s+[-=]{3,}\s*\*\/$/)` on each line individually.
+
+- **`check-function-docs` / `get-function-list-with-comments` attributed section banners as function docs** — fixed in `naming-checker.js` L302–308: `isBanner = /^\/\*\s*[-=]{3,}/.test(opener) && opener.includes('*/')` → banners → `missing` (not `plainDoc`).
+
+- **Mojibake repair** — `mcp-registration.js` had been re-saved at some point as Windows-1252, corrupting 13,176 non-ASCII characters (emoji, arrows, em-dashes) into multi-byte mojibake sequences. Repaired via targeted cluster replacement (`scripts/fix-mojibake-v2.js`) — 727 clusters replaced, 3 fragments fixed manually, 4,443 legitimate unicode preserved.
+
+- **`struct-check` fired on all file types** — `preEditSnapshot` and `postEditDelta` in `edit-response.js` called `structSnapshot` unconditionally. Added `STRUCT_EXTENSIONS` regex gate (`.c .h .js .ts .jsx .tsx .css .scss .java .cs .go .rs .swift`) — struct delta warnings only fire on brace-delimited files.
+
+- **`replace-across-files` subdirectory glob (`test/*.c`) silently returned 0** — `globToRegex()` produces anchored regexes; absolute paths never matched a bare subdirectory prefix. Fixed: also test the path relative to each project root, allowing `test/*.c` to match `C:/proj/test/hal.c`.
+
+- **`replace-function-body` `fails.ambiguousHint` key missing from stats init** — handler bumped `fails.ambiguousHint` at 3 sites but key wasn't in the init object. Added.
+
+- **`delete-block` dryRuns never counted** — two dryRun paths had no `bump('delete_block', 'dryRuns')` call. Added to both.
+
+- **`bump()` hyphen/underscore mismatch** — tools with hyphenated `curTool` names (e.g. `close-file`) looked up `editStats['close-file']` which was undefined; bump silently no-oped. Fixed by adding `const key = toolKey.replace(/-/g, '_')` at the top of `bump()`.
+
+### New features
+
+- **`check-struct` tool** (debugging group) — on-demand absolute structural integrity snapshot for any brace-delimited file: net unclosed `{`, unclosed `/* block comments`, and `#if`/`#endif` depth. Complements the edit-response delta check (which only fires when imbalance gets *worse*).
+
+- **`lineNumberHint` ambiguity guard** — when `lineNumberHint` is set and `old_str` matches more than once in the `±50`-line window, the edit is blocked with a `❌ lineNumberHint ambiguity` response listing every match with a 3-line context preview. Use `occurrence:N` to resolve. Guard bypassed when `occurrence > 1` (caller has declared intent).
+
+- **`lineNumberHint` window capped to `±50` lines** — previously searched from lineNumberHint to EOF. Narrowed to 50 rows each side (`LINE_HINT_RADIUS = 50` constant). Reduces false matches and speeds up large-file searches.
+
+- **Failure capture: `diffVsBuffer` in noMatch response** — when `str_replace` fails with `lineNumberHint` set, the response now includes a `🔬 DIFF` section showing the char-level difference between `old_str` and the actual buffer lines at the lineNumberHint position. Also logged to `failure-log.ndjson` (NDJSON append, grep-queryable).
+
+- **`get-repo-map` file-health flags** — three flags appended to repo map output: `[unicode]` (non-ASCII present), `[mojibake xN]` (corrupted cp1252-as-UTF-8 sequences), `[crlf xN]` (Windows line endings). LLM warned before attempting edits on affected files.
+
+- **`fuzzyContent` box-drawing char normalisation** — runs of `[\u2500-\u257F]` (box-drawing chars like `─ │ ┌`) collapse to `'--'` during normalisation. LLM can write `// -- text --` and match `// -- text ---...`.
+
+- **`$1`/`$2`/`$&` backreference support** in `replace-all`, `replace-across-files`, `sed` — via new `applyReplacement()` helper. Aligns with VS Code / Cline / Claude Code behaviour.
+
+- **Stats UI live refresh** — the Pulsar stats panel now auto-refreshes every 1s via `setInterval` rather than being a one-time snapshot. Timer cleared on Close and End Session.
+
+- **`lineContentHint` parameter on `str_replace`** — content-stable alternative to `lineNumberHint`. Supply a unique string from the anchor line; the tool scans `allLines.findIndex()` for it and scopes the search to a ±50-line window from there. Drift-immune: if lines are inserted above the anchor, the hint still finds the right place. Returns `❌` with a clear message if the string is not found. Counted in the same `hintsUsed.lineNumberHint` bucket for stats.
+
+- **`successNudge` lineNumberHint upgrade suggestion** — when `str_replace` succeeds using only `lineNumberHint` or `lineContentHint` (no `functionHint`/`afterHint`/`betweenHint`) on a file ≥100 lines, the response now appends: `⚡ lineNumberHint is positional and drifts if lines are inserted above it. Next time use afterHint:"<content of matched line>" instead — it's content-stable and won't drift.` The specific `afterHint` string is extracted from the matched line at commit time, so it's immediately usable.
+
+### Docs
+
+- **CHANGELOG, README, package.json, LLM-FAILURE-MODES.md** updated through session 2026-06-08.
+- **`stats-review-after-tree-sitter-migration.md`** rewritten with clean markdown tables, v0.10.25 lifetime stats at session 30.
+- **`mcp-server-refactor-plan.md`** updated: tool framework design, failure capture design, scripted tool execution (3 tiers), struct-check wiring.
+- **`mcp-server-refactor-plan.md`** (2026-06-09): removed two completed TODO items (`lib/string-utils.js` extraction and Levenshtein similarity %); restored missing `### 🔧 MEDIUM — Extend smartSuggestion + logFailure` heading; added `lib/string-utils.js` to Files section; updated audit date.
+- **README.md** (2026-06-09): added `check-struct` tool to Debugging table; added `lib/string-utils.js` to library architecture list; added `fuzzyContent:true` and `regex:true` to `str_replace` table entry; added `get-repo-map` file-health flags (`[unicode]`, `[mojibake]`, `[crlf]`) to Search table; added new "Unicode robustness" section to What makes this different; extended smart failure suggestions section with Levenshtein similarity note; updated `lint` section to reflect always-on behaviour (gate removed in v0.10.25).
+
+- package.json: bumped 0.10.26 -> 0.10.27.
+
+---
+
+## 0.10.26
+
+### Bug fix — stats persistence: `setInterval` and `beforeunload` listener leaks
+
+Every `/mcp` reconnection caused `mcp-registration.js` to be re-evaluated, registering a new `setInterval` and a new anonymous `beforeunload` listener without ever clearing the old ones. After N connections, N timers were running simultaneously — each holding a reference to its own module instance's `lifetimeStats` object. On window reload all accumulated `beforeunload` listeners fired; the last to run (potentially an old instance with lower counts) won the disk write.
+
+**Fix:**
+
+- Named the `beforeunload` callback (`function _beforeUnloadHandler()`) so `removeEventListener` can reference the exact function object.
+- Saved the `setInterval` return value (`const _flushIntervalHandle = setInterval(...)`).
+- Expanded `deactivate()` to call `clearInterval(_flushIntervalHandle)` and `window.removeEventListener('beforeunload', _beforeUnloadHandler)` before flushing stats to disk.
+
+`deactivate()` is already called by `loadMcpModules()` in `pulsar-edit-mcp-server.js` before `delete require.cache`, so cleanup runs on the old instance before the new one loads — correct order, no change needed to the caller.
+
+- package.json: bumped 0.10.25 → 0.10.26.
+
+---
+
+## 0.10.25
+
+### `lib/struct-check.js` — post-edit structural integrity checks
+
+New module `lib/struct-check.js` implements delta-based structural checking fired automatically on every edit to `.c`/`.h` files.
+
+**`snapshot(text)`** captures three metrics before an edit:
+- `braces` — net unclosed `{` count (positive = too many open, negative = too many close)
+- `comments` — count of unclosed `/*` block comments
+- `ifdepth` — net unclosed `#if`/`#ifdef`/`#ifndef` minus `#endif`
+
+**`delta(before, after)`** compares pre- and post-edit snapshots and returns a warning string only when a metric got **worse** — pre-existing imbalances are silently ignored. Output format: `\n⚠️ struct: unmatched opening brace (net +1 { })`. Multiple issues are pipe-separated in a single line.
+
+**`preEditSnapshot(editor)`** and **`postEditDelta(pre, editor)`** in `lib/edit-response.js` updated from stubs to live implementations — both now call into `struct-check.js`.
+
+**`mcp-registration.js`** — `str_replace` commit path wired: `_preSnap = preEditSnapshot(editor)` before the buffer write, `_structSuffix = postEditDelta(_preSnap, editor).struct` after, passed as `struct: _structSuffix` into `buildEditResponse`. The other 14 commit sites still pass `struct: ''` — extension to all tools is the next step.
+
+**Test coverage** — all three metrics confirmed working independently and in combination:
+- Unclosed `{`: `⚠️ struct: unmatched opening brace (net +1 { })`
+- Unclosed `/*`: `⚠️ struct: 1 unclosed block comment (/* without */)`
+- Unclosed `#if`: `⚠️ struct: unclosed #if (depth +1)`
+- Combined brace + `#ifdef`: both issues reported in a single pipe-separated warning
+- All restores produce no struct warning (delta-only confirmed)
+
+**Requires:** Pulsar package reload.
+
+### `lib/edit-response.js` — `buildEditResponse()` + shared edit response infrastructure
+
+New module `lib/edit-response.js` centralises the MCP response envelope that all edit tools return. Previously each tool assembled its own response string inline.
+
+**`buildEditResponse(meta, warnings)`** builds the standard `{ content: [{ type: 'text', text }] }` response:
+- `meta`: `tool`, `line`, `linesChanged`, `scopeLabel`, `tags[]`, `dryRun`
+- `warnings`: `lint`, `style`, `struct`, `nudge` — all optional, all silent when empty
+- Headline format: `✅ str_replace — line 42, +3 lines [fuzzyWhitespace]`
+- Warnings appended only when non-empty (clean edits stay clean)
+
+Wired to all **15 edit commit sites** in `mcp-registration.js`: `str_replace`, `insert`, `delete-line-range`, `delete-block`, `replace-block`, `replace-function-body`, `replace-all`, `replace-document`, `sed`, `apply-patch`, and their dryRun paths.
+
+### Inline linting — always-on (lint gate removed)
+
+`maybeLintSuffix()` in `mcp-registration.js` previously required `lint: true` on every tool call. The gate has been removed — linter output now fires automatically on every edit to a file with active linter-bundle messages in the edited region. Silent when clean or when linter-bundle is not active. The `lint` parameter is accepted but ignored (backwards compatible).
+
+### Failure capture — `noMatch` NDJSON log with `diffVsBuffer`
+
+`str_replace` `noMatch` failures are now logged to `failure-log.ndjson` in the package root (one JSON line per failure, `fs.appendFileSync`, zero deps, grep-queryable).
+
+Each log entry captures: `ts`, `tool`, `reason`, `filePath`, `lineNumberHint`, `hintsSet`, `oldStrPreview` (first line of `old_str`), `diffVsBuffer` (char-level diff of `old_str` lines vs actual buffer lines at `lineNumberHint` — the highest-signal diagnostic field).
+
+`diffVsBuffer` is also included in the **tool response** on failure, so the char-level mismatch is visible immediately without reading the log file.
+
+`failureLogPath` added to `get-edit-stats` return object.
+
+### `str_replace` — `lineNumberHintFallback` removed (correctness fix)
+
+The positional fallback that fired when `lineNumberHint` was set but `old_str` didn't match has been **deleted** (~58 lines). `lineNumberHint` is now a search-narrowing hint only — if `old_str` doesn't match the buffer, the tool fails with full diagnostics (diffVsBuffer, closest area, whitespace analysis). The old fallback was silently overwriting whatever happened to be at the line number, regardless of content. Lifetime stat `lineNumberHintFallback: 218` = 218 silent wrong-content writes.
+
+The `[lineNumberHintFallback]` tag and `lineNumberHintFallback` stat key are removed.
+
+### Stats — universal `bump()` refactor + completeness audit
+
+`bump(toolKey, subPath, n)` now normalises hyphenated tool keys to underscored stat keys (`'close-file'` → `'close_file'`) so all tools resolve correctly regardless of naming convention. Previously hyphenated tools silently dropped all stats.
+
+Missing `bump` calls discovered and fixed across multiple tools:
+- `replace_function_body`: missing `hits` and `dryRuns` bumps
+- `replace_all`: missing `hits` and `dryRuns` bumps
+- `replace_document`: missing `hits` bump
+- `delete_block`: missing `hits` bump on `startContent`/`endContent` commit path; missing `dryRuns` on both dryRun paths; missing `hintsUsed.startContent`
+- `replace_function_body` stats init: missing `hits: 0` key (caused hits to be `undefined`, dropped from output)
+- `fuzzyWhitespaceCommits`: duplicate declaration removed from stats init
+
+Stats init audit: `replace_function_body.fails` added `ambiguousHint: 0` (handler was bumping it but key was missing from init).
+
+### TOOL_CATALOGUE — duplicate entries removed + RESPONSE FORMAT added
+
+- Removed duplicate entries for `str_replace`, `insert`, `replace-function-body`, `get-structural-anchors` (old versions without RESPONSE FORMAT descriptions were stale copies)
+- Added `RESPONSE FORMAT` descriptions to `replace-document`, `delete-line-range`, `delete-block`, `replace-block`, `replace-all`, `apply-patch`
+- Added missing `sed` entry (was absent from TOOL_CATALOGUE entirely)
+- `replace-function-body` description updated: removed stale `lint:true` opt-in wording, now shows RESPONSE FORMAT and notes lint runs automatically
+
+### Bug fixes
+
+- **`str_replace` `noMatch` response missing `content` key** — the noMatch return path had `{ matched: false, strReplFailures: count }` with no `content` key. MCP protocol returned an empty response to the LLM. Fixed: added `content: [{ type: 'text', text: parts.join('\n') }]` as first key. This also made `diffVsBuffer` visible — it was implemented but never reachable.
+- **`str_replace` duplicate `if (sugg) parts.push(sugg)`** — removed one copy.
+- **`fuzzyContent` effectiveOldStr length overshoot** — `substring(idx, idx + effectiveOldStr.length)` used raw length but `idx` was in the normalised haystack. Fixed: walk `searchText` char-by-char from `idx` accumulating normalised lengths until consumed ≥ `normNeedle.length`, then slice.
+- **`str_replace` `wrongOccurrence` diagnostic broken in regex mode** — entered the `indexOf`-scan diagnostic block even when `regex: true`, producing garbage line numbers. Fixed: added early-return path for regex mode that emits a clean `"pattern only matched N time(s)"` message.
+- **`str_replace` garbled `require` block** — `str_replace` on the import block (L9–11) caused two `require` lines to merge onto one line. Recovery: `delete-line-range` + `insert`. Lesson: use delete+insert for single-line fixes in the `require` block — `str_replace` is unreliable there due to long line lengths.
+
+**Requires:** Pulsar package reload (new module `lib/struct-check.js`; `lib/edit-response.js` now live instead of stub-only).
+
+- package.json: bumped 0.10.23 → 0.10.25.
+
+---
+
+## 0.10.24
+
+### Tree-sitter migration — complete
+
+The regex-based function detection era is fully over. All remaining regex-based function-matching sites outside of intentional Ghidra support have been migrated to `tree-sitter-symbols.js`.
+
+- `naming-checker.js` (`checkNaming`, `checkFunctionDocs`): `FN_DEF_RE` removed. Both functions now use `getSymbolsFromText` + `fnByRow` Map pattern for O(1) per-line lookups. `FN_DEF_RE` constant and its `module.exports` entry removed.
+- `mcp-registration.js` `insert-function-doc`: replaced two `FN_DEF_RE_REG` calls with a single `getSymbolsFromText` + `findFunction` call.
+- Migration complete across all files. Only intentional regex remaining: `GHIDRA_FUNC_RE` (decompiled C placeholder names have no tree-sitter grammar support).
+
+This is the v0.10.21 work that was correctly versioned at the time. Package version was bumped 0.10.22 → 0.10.23 for the Unicode suite; 0.10.24 covers the tree-sitter completion milestone and the library extraction work that followed.
+
+### Library extraction — shared helper modules
+
+The long-term goal of making each tool a declarative config object powered by shared libraries began in earnest this version. Functions previously inlined in `mcp-registration.js` were extracted into dedicated modules:
+
+- **`lib/style-checker.js`** — already existed; `checkLines`, `formatViolations`, `isKernelFile`, `applyStyleCheck` now imported cleanly.
+- **`lib/naming-checker.js`** — `checkNaming`, `checkFunctionDocs`, `buildDocSkeleton`, `formatNamingViolations`.
+- **`lib/tree-sitter-symbols.js`** — `getSymbols`, `getSymbolsFromText`, `findFunction`, `resolveAnchor`, `braceEndRow`.
+- **`lib/edit-response.js`** — `buildEditResponse`, `preEditSnapshot`, `postEditDelta` (stubs, to be populated in v0.10.25).
+
+The remaining module-scope helpers in `mcp-registration.js` (`maybeLintSuffix`, `smartSuggestion`, `successNudge`, `ambiguityCheck`, `bump`, `anchorError`, `isCodeFilePath`, `lintSnapshot`) are candidates for the next extraction phase once the Tool Framework (lib/tool-framework.js) design is finalised.
+
+- package.json: 0.10.23 is the last public tag; 0.10.24 is the internal milestone version for this work.
+
+---
+
 ## 0.10.23
 
 ### `str_replace` — Unicode robustness suite (Stages 1–3)
@@ -11,13 +247,13 @@ Three new matching modes address a long-standing failure class where LLM-generat
 - New stat: `fuzzyContentCommits` — counts how often this path saved a retry.
 - Schema: `fuzzyContent: z.boolean().optional()`. Requires Pulsar package reload.
 
-#### Stage 2 — `lineHintFallback` (position-based auto-rescue)
+#### Stage 2 — `lineNumberHintFallback` (position-based auto-rescue)
 
-- When exact match fails AND `lineHint` is set, the handler falls back to a direct positional replace at the line hint row — no content match required.
+- When exact match fails AND `lineNumberHint` is set, the handler falls back to a direct positional replace at the line hint row — no content match required.
 - Intended for encoding-agnostic situations where the tool knows exactly where the target line is (e.g. from a prior `grep-file` result) but the buffer content contains unpredictable Unicode.
-- Success response tagged `[lineHintFallback]` to signal the caller this path was used.
-- New stat: `lineHintFallback` — counts blind-positional fallback commits.
-- **Caution:** a wrong `lineHint` will silently corrupt. The tag in the response signals the caller.
+- Success response tagged `[lineNumberHintFallback]` to signal the caller this path was used.
+- New stat: `lineNumberHintFallback` — counts blind-positional fallback commits.
+- **Caution:** a wrong `lineNumberHint` will silently corrupt. The tag in the response signals the caller.
 - Requires Pulsar package reload (new schema key).
 
 #### Stage 3 — `regex:true` (LLM escape hatch)
@@ -26,8 +262,8 @@ Three new matching modes address a long-standing failure class where LLM-generat
 - Invalid patterns return a clean error with the JS error message.
 - Success/dryRun responses tagged `[regex]`.
 - New stat: `regexCommits`.
-- `occurrence:N` applies to regex matches; `lineHint` provides the search window.
-- When both `regex:true` AND `lineHint` are set: Layer 2 (lineHintFallback) fires first if the regex finds no match — lineHint is the stronger signal. To force regex-only, omit `lineHint`.
+- `occurrence:N` applies to regex matches; `lineNumberHint` provides the search window.
+- When both `regex:true` AND `lineNumberHint` are set: Layer 2 (lineNumberHintFallback) fires first if the regex finds no match — lineNumberHint is the stronger signal. To force regex-only, omit `lineNumberHint`.
 
 #### Test coverage
 
@@ -730,7 +966,7 @@ All `registerTool` descriptions and `TOOL_CATALOGUE` short descriptions have bee
 **Philosophy change:** An LLM reading `"supports functionHint"` has no trigger to fire on. An LLM reading `"Know the function name? → functionHint:'myFn' — scopes search to inside that function body, safest choice for JS/C"` has a concrete decision rule.
 
 **Tools rewritten (registerTool descriptions):**
-- `str_replace` — decision ladder: (1) functionHint (2) afterHint (3) betweenHint (4) lineHint (5) occurrence. Each step lists when to use it, not just what it does
+- `str_replace` — decision ladder: (1) functionHint (2) afterHint (3) betweenHint (4) lineNumberHint (5) occurrence. Each step lists when to use it, not just what it does
 - `insert` — decision ladder: (1) functionEnd (2) afterContent/beforeContent (3) with functionHint (4) occurrence (5) insert_line as last resort
 - `find-text` — rewritten around use cases: "use before str_replace to count occurrences", "matchCount > 1 means use a hint"
 - `delete-line-range` — decision ladder: (1) functionHint (2) betweenHint (3) afterHint (4) startLine+endLine
@@ -739,7 +975,7 @@ All `registerTool` descriptions and `TOOL_CATALOGUE` short descriptions have bee
 - `get-region` — rewritten as "verify before editing" tool with follow-up workflow
 - `replace-across-files` — two-step workflow (Step 1 / Step 2) made explicit
 - `replace-function-body` — workflow guidance: "use read-lines with functionHint first, then call replace-function-body"
-- `grep-file` — "PRIMARY USE: locate content to get line numbers before editing"; occurrence:N linked to str_replace lineHint
+- `grep-file` — "PRIMARY USE: locate content to get line numbers before editing"; occurrence:N linked to str_replace lineNumberHint
 - `grep-project` — "PRIMARY USE: find where a symbol is when you don't know the file"
 - `read-lines` — decision ladder for all 5 modes, return values linked to downstream tools
 - `get-structural-anchors` — TYPICAL WORKFLOW section added
@@ -781,7 +1017,7 @@ New params: `contextLines` (number, default 2), `maxMatches` (number, default 50
 
 Both tools had `hintsUsed` fields in the stats initializer and `getEditStats()` return blocks, but the handlers never incremented them — hint usage was silently dropped from stats.
 
-- `read-lines`: now bumps `hintsUsed.functionHint`, `hintsUsed.afterHint`, `hintsUsed.betweenHint`, or `hintsUsed.lineHint` (centerLine maps to the lineHint bucket) on each successful call where a hint was used.
+- `read-lines`: now bumps `hintsUsed.functionHint`, `hintsUsed.afterHint`, `hintsUsed.betweenHint`, or `hintsUsed.lineNumberHint` (centerLine maps to the lineNumberHint bucket) on each successful call where a hint was used.
 - `get-region`: now bumps `hintsUsed.occurrence` when `occurrence > 1` is passed.
 
 Hot-reload safe — handler body changes only.
@@ -901,13 +1137,13 @@ All three grep/search tools now support scoped result narrowing on par with the 
 - **`functionHint`** — scan for a named function, brace-count to find its body, return it
 - **`afterHint`** — return lines starting after the first occurrence of an anchor string
 - **`betweenHint: { start, end }`** — return lines between two anchor strings
-- **`lineHint`** — alias for `centerLine` (radius defaults to 10)
+- **`lineNumberHint`** — alias for `centerLine` (radius defaults to 10)
 
 `startLine`/`endLine` still work as before for callers that know exact line numbers.
 
 ### `delete-line-range` schema fix — hints were silently ignored
 
-**Bug fix:** `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented in its handler but none of them were declared in `inputSchema`. The LLM could never pass them — they were silently dropped. Fixed by spreading `ANCHOR_SCHEMA` into the inputSchema and making `startLine`/`endLine` optional (required only when no hint is provided).
+**Bug fix:** `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineNumberHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented in its handler but none of them were declared in `inputSchema`. The LLM could never pass them — they were silently dropped. Fixed by spreading `ANCHOR_SCHEMA` into the inputSchema and making `startLine`/`endLine` optional (required only when no hint is provided).
 
 ### `get-surrounding-context` removed
 
@@ -927,7 +1163,7 @@ Replaced `failureSuggestion()` with `smartSuggestion(ctx)` + `successNudge(ctx)`
 
 ### Ambiguity guard — blocks silent wrong-occurrence edits
 
-`str_replace` now counts all occurrences of `effectiveOldStr` in the full file before committing. If `totalMatches > 1` and no scope hint is set (no `functionHint`/`afterHint`/`betweenHint`/`lineHint` and `occurrence <= 1`), the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing all line numbers where it matches and the specific hints to use. Scan capped at 20 matches for performance.
+`str_replace` now counts all occurrences of `effectiveOldStr` in the full file before committing. If `totalMatches > 1` and no scope hint is set (no `functionHint`/`afterHint`/`betweenHint`/`lineNumberHint` and `occurrence <= 1`), the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing all line numbers where it matches and the specific hints to use. Scan capped at 20 matches for performance.
 
 Previously `str_replace` with an ambiguous `old_str` would silently replace occurrence 1 — the most dangerous silent failure mode.
 
@@ -997,7 +1233,7 @@ All four tools now return structured context on failure so the LLM can correct a
 ### New features on existing tools
 
 **`str_replace`**
-- `afterHint` — Start the search after the first occurrence of a content string in the file. Content-stable equivalent of `lineHint`, immune to line-number drift.
+- `afterHint` — Start the search after the first occurrence of a content string in the file. Content-stable equivalent of `lineNumberHint`, immune to line-number drift.
 - `betweenHint: { start, end }` — Restrict the search to the region between two anchor strings. More precise than `afterHint` alone; useful for switch cases, struct blocks, `#ifdef` regions.
 - `occurrence:N` — Replace the Nth match instead of the first. Fixes duplicate-pattern confusion without needing to widen `old_str`.
 - `fuzzyWhitespace:true` — Match ignoring per-line indentation differences; commit using the buffer's actual whitespace. Eliminates the most common retry loop (fail → read → fix indent → retry).
@@ -1032,7 +1268,7 @@ Any existing prompts or system instructions that reference the old names must be
 
 **`str_replace` (formerly `replace-text`)**
 - `functionHint` — scope the search to a named function body only. The match is rejected if `old_str` is not found inside that function. Immune to line-number drift; preferred for JS/C edits.
-- `lineHint` — start the search at or after a specific 1-based line. Useful when the same text appears multiple times and `functionHint` is not applicable.
+- `lineNumberHint` — start the search at or after a specific 1-based line. Useful when the same text appears multiple times and `functionHint` is not applicable.
 - `dryRun` — preview the match and surrounding context without writing. Returns matched lines with `►` markers. Commit by re-calling without `dryRun`.
 - **Smart failure diagnostics** — on a no-match, the tool now: (a) reports whitespace/indentation differences line-by-line for each `old_str` line whose trimmed content exists in the buffer, (b) reports partial consecutive-line match count before divergence, (c) finds the closest fuzzy area via word-scoring and shows it with line numbers. Consecutive failure counter triggers a tool-switch suggestion after 3 failures.
 

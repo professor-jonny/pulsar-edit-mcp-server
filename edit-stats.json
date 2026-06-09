@@ -1,141 +1,151 @@
 {
   "str_replace": {
-    "hits": 760,
+    "hits": 1114,
     "fails": {
-      "noMatch": 78,
-      "whitespace": 36,
-      "partialMatch": 14,
-      "ambiguous": 0,
+      "noMatch": 178,
+      "whitespace": 66,
+      "partialMatch": 20,
+      "ambiguous": 6,
       "outOfScope": 0,
-      "afterNotFound": 0,
-      "wrongOccurrence": 0
+      "afterNotFound": 6,
+      "wrongOccurrence": 8
     },
     "hintsUsed": {
-      "functionHint": 20,
-      "afterHint": 40,
-      "lineHint": 788,
-      "betweenHint": 0,
-      "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "functionHint": 42,
+      "afterHint": 54,
+      "lineNumberHint": 42,
+      "betweenHint": 2,
+      "occurrence": 12,
+      "fuzzyWhitespace": 6,
+      "lineHint": 1328
     },
-    "fuzzyWhitespaceCommits": 20,
-    "fuzzyContentCommits": 0,
-    "regexCommits": 2,
-    "lineHintFallback": 56,
-    "_oldStrLenSum": 3406,
-    "dryRuns": 17
+    "fuzzyWhitespaceCommits": 34,
+    "fuzzyContentCommits": 6,
+    "autoStripCommentCommits": 6,
+    "regexCommits": 6,
+    "_oldStrLenSum": 4966,
+    "lineHintFallback": 240,
+    "dryRuns": 18
   },
   "insert": {
-    "hits": 58,
+    "hits": 120,
     "fails": {
       "outOfRange": 0,
-      "anchorNotFound": 6
+      "anchorNotFound": 12
     },
     "hintsUsed": {
       "functionHint": 2,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
-      "occurrence": 0,
+      "occurrence": 2,
       "fuzzyWhitespace": 0,
-      "afterContent": 28,
-      "beforeContent": 14,
-      "functionEnd": 2,
+      "afterContent": 74,
+      "beforeContent": 42,
+      "functionEnd": 8,
       "sectionHint": 0,
       "preprocBlock": 0,
-      "endOfFile": 4
+      "endOfFile": 16,
+      "lineHint": 0
     },
-    "dryRuns": 6
+    "dryRuns": 8
   },
   "delete_line_range": {
-    "hits": 36,
+    "hits": 72,
     "fails": {
       "outOfRange": 2,
       "inverted": 0
     },
     "hintsUsed": {
-      "functionHint": 0,
+      "functionHint": 4,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 4,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
-    "dryRuns": 12
+    "dryRuns": 14
   },
   "replace_function_body": {
-    "hits": 20,
+    "hits": 26,
     "fails": {
       "notFound": 10,
-      "ambiguous": 0
+      "ambiguous": 0,
+      "ambiguousHint": 0
     },
     "hintsUsed": {
-      "functionHint": 0,
+      "functionHint": 4,
       "afterHint": 2,
-      "lineHint": 14,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 2,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 16
     },
-    "dryRuns": 28
+    "dryRuns": 34
   },
   "replace_block": {
-    "hits": 0,
+    "hits": 2,
     "fails": {
       "anchorNotFound": 0,
-      "braceMatchFailed": 0
+      "braceMatchFailed": 2
     },
     "hintsUsed": {
-      "functionHint": 0,
+      "functionHint": 4,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
     "dryRuns": 0
   },
   "apply_patch": {
     "hits": 0,
     "fails": {
-      "contextMismatch": 6,
-      "exception": 6
+      "contextMismatch": 20,
+      "exception": 20
     },
     "largeEditWarnings": 0,
     "hintsUsed": {
       "functionHint": 0,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
     "dryRuns": 0
   },
   "replace_all": {
-    "hits": 2,
+    "hits": 16,
     "fails": {
-      "noMatch": 0
+      "noMatch": 2
     },
     "hintsUsed": {
       "functionHint": 0,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
-    "dryRuns": 0
+    "dryRuns": 4
   },
   "get_structural_anchors": {
-    "hits": 4,
+    "hits": 12,
     "hintsUsed": {
       "functionHint": 0,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
     "dryRuns": 0
   },
@@ -149,51 +159,55 @@
     "hintsUsed": {
       "functionHint": 10,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 10,
       "fuzzyWhitespace": 0,
       "sectionHint": 0,
       "preprocBlock": 0,
-      "endContent": 16
+      "startContent": 2,
+      "endContent": 22,
+      "lineHint": 0
     },
     "dryRuns": 0
   },
   "sed": {
-    "hits": 4,
+    "hits": 6,
     "fails": {
       "addressNotFound": 0,
       "badExpression": 0,
-      "noMatch": 2
+      "noMatch": 4
     },
     "hintsUsed": {
       "functionHint": 0,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
-    "dryRuns": 0
+    "dryRuns": 2
   },
   "read_lines": {
-    "hits": 528,
+    "hits": 1136,
     "fails": {
       "outOfRange": 0,
       "anchorNotFound": 0
     },
     "hintsUsed": {
-      "functionHint": 14,
+      "functionHint": 26,
       "afterHint": 2,
-      "lineHint": 54,
-      "betweenHint": 2,
+      "lineNumberHint": 0,
+      "betweenHint": 4,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 92
     },
     "dryRuns": 0
   },
   "get_region": {
-    "hits": 0,
+    "hits": 2,
     "fails": {
       "startNotFound": 0,
       "endNotFound": 0
@@ -201,75 +215,76 @@
     "hintsUsed": {
       "functionHint": 0,
       "afterHint": 0,
-      "lineHint": 0,
+      "lineNumberHint": 0,
       "betweenHint": 0,
       "occurrence": 0,
-      "fuzzyWhitespace": 0
+      "fuzzyWhitespace": 0,
+      "lineHint": 0
     },
     "dryRuns": 0
   },
   "get_selection": {
-    "hits": 2,
+    "hits": 4,
     "dryRuns": 0
   },
   "find_text": {
-    "hits": 6,
+    "hits": 10,
     "fails": {
       "noMatch": 2
     },
     "dryRuns": 0
   },
   "get_linter_messages": {
-    "hits": 66,
+    "hits": 188,
     "dryRuns": 0
   },
   "grep_file": {
-    "hits": 602,
+    "hits": 1152,
     "fails": {
-      "noMatch": 238
+      "noMatch": 576
     },
     "hintsUsed": {
-      "occurrence": 34,
-      "contextLines": 312
+      "occurrence": 90,
+      "contextLines": 704
     }
   },
   "grep_project": {
-    "hits": 18,
+    "hits": 38,
     "fails": {
-      "noMatch": 50
+      "noMatch": 86
     },
     "hintsUsed": {
-      "occurrence": 0,
-      "contextLines": 10
+      "occurrence": 2,
+      "contextLines": 24
     }
   },
   "search_symbol": {
-    "hits": 2,
+    "hits": 4,
     "fails": {
       "noMatch": 0
     },
     "hintsUsed": {
       "occurrence": 0,
-      "contextLines": 0
+      "contextLines": 2
     }
   },
   "replace_document": {
-    "hits": 24
+    "hits": 30
   },
   "replace_across_files": {
-    "hits": 30,
+    "hits": 34,
     "fails": {
       "skipped": 0
     },
     "dryRuns": 50
   },
   "run_command": {
-    "hits": 326,
+    "hits": 900,
     "fails": {
       "spawnError": 0
     },
     "misses": {
-      "exitNonZero": 36,
+      "exitNonZero": 100,
       "timedOut": 0
     },
     "get_repo_map": {
@@ -280,7 +295,7 @@
     }
   },
   "get_repo_map": {
-    "hits": 42,
+    "hits": 116,
     "fails": {
       "noProject": 0
     }
@@ -292,13 +307,13 @@
     }
   },
   "goto_focus": {
-    "hits": 0,
+    "hits": 2,
     "fails": {
       "noEditor": 0
     }
   },
   "get_project_paths": {
-    "hits": 0,
+    "hits": 8,
     "fails": {}
   },
   "add_project_path": {
@@ -308,20 +323,20 @@
     }
   },
   "ghidra_list_functions": {
-    "hits": 0,
+    "hits": 2,
     "fails": {
       "noEditor": 0
     }
   },
   "ghidra_search_functions": {
-    "hits": 6,
+    "hits": 8,
     "fails": {
       "noEditor": 0,
-      "noMatch": 0
+      "noMatch": 2
     }
   },
   "ghidra_get_function_body": {
-    "hits": 6,
+    "hits": 8,
     "fails": {
       "noEditor": 0,
       "notFound": 0
@@ -331,24 +346,24 @@
     "hits": 0,
     "fails": {
       "noEditor": 0,
-      "noMatch": 0
+      "noMatch": 2
     }
   },
   "ghidra_add_comment": {
-    "hits": 0,
+    "hits": 2,
     "fails": {
       "noEditor": 0,
       "notFound": 0
     }
   },
   "ghidra_get_function_list_with_comments": {
-    "hits": 6,
+    "hits": 8,
     "fails": {
       "noEditor": 0
     }
   },
   "namingcheck": {
-    "hits": 10,
+    "hits": 11,
     "fails": {
       "notKernel": 1
     },
@@ -373,7 +388,7 @@
       "noEditor": 0
     }
   },
-  "sessionCount": 16,
+  "sessionCount": 49,
   "set_selections": {
     "hits": 0,
     "fails": {
@@ -385,13 +400,13 @@
       "introduced": 0
     },
     "wrong_indentation": {
-      "introduced": 12
+      "introduced": 61
     },
     "dos_line_endings": {
       "introduced": 0
     },
     "missing_newline_eof": {
-      "introduced": 12
+      "introduced": 52
     },
     "trailing_blank_lines": {
       "introduced": 0
@@ -441,19 +456,19 @@
     "singleline_if": {
       "introduced": 0
     },
-    "_cleanEdits": 0,
-    "_totalCHEdits": 12,
-    "_totalViolations": 24,
-    "_checkpatchRuns": 1,
-    "_checkpatchViolations": 0
+    "_cleanEdits": 19,
+    "_totalCHEdits": 72,
+    "_totalViolations": 113,
+    "_checkpatchRuns": 2,
+    "_checkpatchViolations": 32
   },
   "check-function-docs": {
-    "hits": 13,
+    "hits": 15,
     "fails": {},
     "misses": {}
   },
   "insert-function-doc": {
-    "hits": 10,
+    "hits": 11,
     "fails": {}
   }
 }

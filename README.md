@@ -28,6 +28,8 @@ Before committing any edit, `str_replace`, `replace-block`, `replace-function-bo
 ### 🎯 Smart failure suggestions
 When `str_replace` fails to match, the response immediately analyses *why*: whitespace and indentation differences are reported line-by-line, how many consecutive lines matched before diverging is counted, and the closest area of the file is found via fuzzy word-scoring. The suggestion engine fires **on failure #1** — if `old_str` looks like a whole function it suggests `replace-function-body`; if it looks like a brace block it suggests `replace-block`; on a large file with no hints it adds urgency. Escalates at failure #2 with tool-switch recommendations. On a *successful* edit with no hints on a file >300 lines, a nudge appended tells you which hints to use next time — closing the loop before problems start.
 
+For multi-line `old_str` failures a **Levenshtein similarity score** is also returned: `📊 Similarity: 71% — likely whitespace drift, try fuzzyWhitespace:true`. Anchor resolution failures (`afterHint`/`betweenHint` not found) show the nearest symbol name and its similarity percentage so typos in hint strings are caught immediately.
+
 ### 📐 Content-anchored editing — immune to line number drift
 All edit tools support scope hints that anchor by *content* rather than line number:
 - `functionHint` — scopes the search to inside a named function body
@@ -62,6 +64,55 @@ A full suite of Ghidra RE tools — `list-functions`, `search-functions`, `get-f
 
 ### 🩹 apply-patch fuzzy rescue
 When a unified diff patch fails to apply, the tool automatically attempts fuzzy/indent-aware hunk recovery and shows a corrected diff preview. Reply with `confirm:true` to apply the rescued version — no need to rewrite the patch.
+
+### ✅ Structured edit responses — consistent feedback on every commit
+
+Every edit tool returns a standardised response via `lib/edit-response.js`:
+
+```
+✅ str_replace — line 42, +3 lines [fuzzyWhitespace]
+🎨 style: [L2] wrong indentation
+⚠️ struct: unmatched opening brace (net +1 { })
+```
+
+The headline tells you exactly where the edit landed and what matching mode was used. Warnings are silent when clean — a successful edit on correct code produces a single clean line. All 15 commit sites across all edit tools use the same builder, so responses are predictable regardless of which tool you call.
+
+### 🏗 Post-edit structural integrity checks
+
+`lib/struct-check.js` computes a **delta snapshot** before and after every `str_replace` edit on `.c`/`.h` files. It detects three structural problems that style checkers and linters miss:
+
+- **Unmatched braces** — net unclosed `{` count changed for the worse
+- **Unclosed block comments** — a `/*` was introduced without a matching `*/`
+- **`#if`/`#endif` imbalance** — a preprocessor conditional was left open
+
+Delta-only means pre-existing problems in the file are silently ignored — only damage introduced by *this edit* is reported. Multiple issues in one edit are pipe-separated on a single line. The check is always-on and zero-configuration.
+
+### 🔬 Failure capture — char-level diagnostics on `noMatch`
+
+When `str_replace` fails to match, a `🔬 DIFF` block in the response shows the char-level diff between your `old_str` and the actual buffer content at the `lineNumberHint` position — the exact byte where the strings diverged, including invisible characters like smart quotes vs straight quotes, NBSP, or zero-width spaces. Every failure is also logged to `failure-log.ndjson` in the package root (one JSON line per failure, grep-queryable) with `diffVsBuffer`, `oldStrPreview`, and the full hint context.
+
+### 🌐 Unicode robustness — three matching modes for encoding problems
+
+LLMs frequently generate `old_str` containing Unicode variants that differ from what the buffer holds (smart quotes, em-dashes, NBSP, zero-width chars). Three modes address this without requiring a re-read:
+
+- **`fuzzyContent:true`** — normalises both `old_str` and the buffer to ASCII-equivalent before matching (smart quotes → straight, em-dash → hyphen, NBSP → space, surrogate pairs stripped). The replacement is committed against the original buffer content — encoding is preserved.
+- **`regex:true`** — treats `old_str` as a JS regex. Use `.` to wildcard a single problematic char, `.*` for a span. Supports `occurrence:N` and `lineNumberHint` scoping.
+- **`fuzzyWhitespace:true`** — existing mode, handles indentation-only mismatches.
+
+All three can be layered. `get-repo-map` now appends a `[unicode]` flag to files containing non-ASCII characters — a heads-up to use `fuzzyContent` or `regex:true` before the first edit fails.
+
+### 📦 Shared library architecture — tools as declarative configs (in progress)
+
+`mcp-registration.js` is being refactored from a monolith into a set of shared libraries that each tool calls into. Libraries extracted so far:
+
+- **`lib/style-checker.js`** — kernel C style rules, `applyStyleCheck`, `isKernelFile`
+- **`lib/naming-checker.js`** — `checkNaming`, `checkFunctionDocs`, `buildDocSkeleton`
+- **`lib/tree-sitter-symbols.js`** — `getSymbols`, `resolveAnchor`, `findFunction`, `braceEndRow`
+- **`lib/edit-response.js`** — `buildEditResponse`, `preEditSnapshot`, `postEditDelta`
+- **`lib/struct-check.js`** — `snapshot`, `delta`
+- **`lib/string-utils.js`** — pure utilities: `escapeRegex`, `applyReplacement`, `globToRegex`, `levenshteinDistance`, `calculateSimilarity`
+
+The end goal is `lib/tool-framework.js` — a `registerMcpTool()` wrapper where each tool is a declarative config object and all cross-cutting concerns (stats, dryRun, consecutive failure counters, style/lint/struct checking) are handled centrally. Phase 0 (data-driven `summarise`/`buildReport`) and Phase 1 (framework + 2 tool PoC) are next.
 
 
 <img src="https://github.com/user-attachments/assets/52c74f89-d76f-4faa-9265-009bdc78c32c" width="700" />
@@ -142,12 +193,12 @@ Always loaded. Cannot be disabled.
 
 | Tool | Description |
 |---|---|
-| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. **Always use a hint on files >100 lines.** Decision ladder: (1) know the function name? → `functionHint` — scopes to that function body, safest for JS/C; (2) unique string just before the edit? → `afterHint`; (3) inside a block (switch/struct/#ifdef)? → `betweenHint:{start,end}`; (4) have a line number from grep? → `lineHint`; (5) same pattern N times? → `occurrence:N`. `fuzzyWhitespace:true` when indentation mismatches cause failures. `dryRun:true` to preview multi-line matches before committing |
+| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. **Always use a hint on files >100 lines.** Decision ladder: (1) know the function name? → `functionHint` — scopes to that function body, safest for JS/C; (2) unique string just before the edit? → `afterHint`; (3) inside a block (switch/struct/#ifdef)? → `betweenHint:{start,end}`; (4) have a line number from grep? → `lineNumberHint`; (5) same pattern N times? → `occurrence:N`. `fuzzyWhitespace:true` when indentation mismatches cause failures. `fuzzyContent:true` for Unicode mismatches (smart quotes, em-dashes, NBSP, zero-width chars). `regex:true` to treat `old_str` as a JS regex — use `.` to wildcard a single problem char. `dryRun:true` to preview multi-line matches before committing |
 | `replace-all` | Replace ALL occurrences of a string or regex in the active editor. Supports `dryRun` to preview match count and locations before writing |
 | `replace-document` | Replace the entire editor contents |
 | `replace-function-body` | Atomically replace a named function's full signature and body in one operation — avoids line-number shifting. Supports `dryRun` |
 | `insert` | Insert one or more lines. Use `endOfFile:true` to append at end of file (simplest). Use `afterContent`/`beforeContent` (content-anchored, immune to line drift) for mid-file inserts. Supports `functionEnd`, `functionHint`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
-| `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `functionHint`, `betweenHint`, `afterHint`, `lineHint`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
+| `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `functionHint`, `betweenHint`, `afterHint`, `lineNumberHint`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
 | `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed. Supports `occurrence:N` to target the Nth match of `startContent`. Tracks hintsUsed in stats |
@@ -161,7 +212,7 @@ Always loaded. Cannot be disabled.
 | Tool | Description |
 |---|---|
 | `read-file` | Read any project file with 1-based line numbers. Reads from the live buffer if the file is open in Pulsar, otherwise from disk |
-| `read-lines` | Read lines from any file. Supports hint-based resolution: `functionHint` (extract a named function body), `afterHint` (lines after an anchor string), `betweenHint` (lines between two anchors), `centerLine`+`radius` (window around a line), `lineHint` (alias for centerLine). `startLine`/`endLine` still work when exact line numbers are known. Buffer-first when the file is open in Pulsar |
+| `read-lines` | Read lines from any file. Supports hint-based resolution: `functionHint` (extract a named function body), `afterHint` (lines after an anchor string), `betweenHint` (lines between two anchors), `centerLine`+`radius` (window around a line), `lineNumberHint` (alias for centerLine). `startLine`/`endLine` still work when exact line numbers are known. Buffer-first when the file is open in Pulsar |
 | `create-file` | Create a new file and open it in the editor |
 | `move-file` | Move or rename a file. Open tab is retargeted in-place via `buffer.setPath()` — undo history preserved |
 | `copy-file` | Copy a file to a new path and open the copy in a new tab. If the source is open with unsaved edits, the copy reflects the live buffer content |
@@ -196,7 +247,7 @@ Always loaded. Cannot be disabled.
 | `grep-file` | Search a file for a pattern and return matching lines. Supports `contextLines` (N lines before/after each match) and `occurrence:N` (return only the Nth match). Buffer-first when the file is open in Pulsar |
 | `grep-project` | Search all project files for a pattern. Supports `contextLines` and `occurrence:N`. Buffer-first for open files — unsaved edits are always reflected |
 | `search-symbol` | Find all uses of a C symbol with whole-word matching. Supports `contextLines` and `occurrence:N`. Buffer-first for open files |
-| `get-repo-map` | Aider-style compressed codebase index. Extracts symbols via tree-sitter (open editors) or regex fallback, ranks files by PageRank, renders with `│` signature lines and `⋮...` ellipsis between gaps. Output fits within a token budget. Use as the first call on an unfamiliar project. Params: `glob`, `excludeGlob` (exclude folders/files e.g. `**/.mcp-baseline/**`), `maxTokens` (default 1024), `minRefs`, `mentionedFiles` (PageRank boost), `includeLineNumbers` |
+| `get-repo-map` | Aider-style compressed codebase index. Extracts symbols via tree-sitter (open editors) or regex fallback, ranks files by PageRank, renders with `│` signature lines and `⋮...` ellipsis between gaps. Output fits within a token budget. Use as the first call on an unfamiliar project. Appends **file-health flags** to affected files: `[unicode]` (non-ASCII present — use `fuzzyContent` or `regex:true` when editing), `[mojibake xN]` (corrupted cp1252-as-UTF-8 encoding), `[crlf xN]` (Windows line endings). Params: `glob`, `excludeGlob`, `maxTokens` (default 1024), `minRefs`, `mentionedFiles` (PageRank boost), `includeLineNumbers` |
 
 > Grep tools use a cross-platform implementation so they work consistently on Windows and Unix. All three tools (`grep-file`, `grep-project`, `search-symbol`) read from the live buffer when a file is open in Pulsar, so unsaved edits are always visible without saving first.
 
@@ -229,6 +280,7 @@ Always loaded. Cannot be disabled.
 | `get-edit-stats` | Return per-tool edit statistics for the current session and lifetime totals (persisted in `edit-stats.json`). Covers all edit tools and all search tools (`grep-file`, `grep-project`, `search-symbol`, `find-text`, `replace-across-files`). SESSION: counters since last restart. LIFETIME: cumulative across all sessions. Tracks hits, fail reasons, hint usage (including `occurrence`/`contextLines` for search tools), dry-run count, fuzzy whitespace commits, and average `old_str` length. Pass `reset:true` to flush session into lifetime and zero session counters |
 | `session-notes` | Persistent cross-session notes written by the LLM. `action:write` appends a note (what failed, what fix worked, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Notes survive server restarts and are stored in `session-notes.json` in the package root |
 | `checkpatch` | Run kernel-style whitespace and formatting checks against a C/C++ file. Pass `filePath` to audit any project file, or omit to audit the active editor buffer (live, no save required). Results grouped by rule sorted by frequency, capped at 20 per rule. Returns a clean confirmation when no violations found. Non-.c/.h files are silently skipped. Useful for auditing the full-file style state before or after a series of LLM edits. Stats tracked in `get-edit-stats` (`checkpatchRuns` + `checkpatchViolations`) |
+| `check-struct` | On-demand absolute structural integrity snapshot for any brace-delimited file. Reports net unclosed `{` count, unclosed `/* block comments`, and `#if`/`#endif` nesting depth. Complements the automatic per-edit delta check — use this when you need an absolute reading, not just a delta |
 | `namingcheck` | Check a kernel C file for naming convention violations: function names missing a verb-tier prefix (`get_`, `set_`, `init_`, `handle_`, …), camelCase in function or variable names, `#define` macros not ALL_CAPS. Returns violations with line numbers. Kernel `.c`/`.h` files only |
 | `check-function-docs` | Check that every non-static function in a kernel C file has a kernel-doc `/**` comment above it. Three severity tiers: **missing** (no comment), **wrongStyle** (`//` comment — always wrong), **plainDoc** (`/* */` present — advisory). Each entry includes the full signature and `[in header]` tag (detected from sidecar `.h`). Kernel `.c`/`.h` files only |
 | `insert-function-doc` | Insert a kernel-doc `/**` skeleton above a named function: `function_name() - desc`, `@param:` per argument (variadic `...` emits `@...:` per spec), `Context: Any context.`, `Return:`. Accepts optional `line:` (1-based, from `check-function-docs`) as a direct anchor — falls back to file scan. Aborts if a comment already exists. Kernel `.c`/`.h` files only |
@@ -299,7 +351,7 @@ The file is re-read on every trigger — edits take effect without reload. If `s
 
 ### tool description decision ladders
 
-All tool descriptions have been rewritten to lead with **decision triggers** — concrete "when to use this" rules rather than feature lists. Each hint (`functionHint`, `afterHint`, `betweenHint`, `lineHint`, `occurrence`) now has an explicit trigger condition so the LLM reaches for the right hint at the right moment, not just after a failure.
+All tool descriptions have been rewritten to lead with **decision triggers** — concrete "when to use this" rules rather than feature lists. Each hint (`functionHint`, `afterHint`, `betweenHint`, `lineNumberHint`, `occurrence`) now has an explicit trigger condition so the LLM reaches for the right hint at the right moment, not just after a failure.
 
 ### smart failure responses
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
@@ -313,12 +365,11 @@ All tool descriptions have been rewritten to lead with **decision triggers** —
 - The same guard applies to `replace-block` (checks the anchor string), `replace-function-body` (checks the function name as a definition-like pattern), and `delete-block` (checks `startContent`)
 - Passing `occurrence:N` where N > 1 disables the guard — you are already being deliberate about multiples
 
-### `lint: true` — inline linter feedback
+### `lint` — inline linter feedback (always-on)
 
-- Pass `lint: true` to any edit tool (`str_replace`, `replace-function-body`, `replace-block`, `insert`, `delete-line-range`, `delete-block`, `apply-patch`, `replace-all`, `sed`) to have the response automatically append a scoped linter snapshot after the edit — no separate `get-diagnostics` call needed
-- Scope: rows touched by the edit (insert/replace: inserted range ±5; delete: deletion point ±5 lines). `apply-patch`, `replace-all`, and `sed` use whole-file scope — they touch arbitrary locations
-- Errors + warnings only. Silent when clean. Silent when linter-bundle is not active (safe on all project types)
-- Opt-in by design: passing `lint: true` only when you want the feedback keeps output clean otherwise
+- Linter feedback fires automatically on every edit — no `lint: true` opt-in needed. The parameter is still accepted for backwards compatibility but is ignored; the gate has been removed.
+- Scope: rows touched by the edit (insert/replace: inserted range ±5; delete: deletion point ±5 lines). `apply-patch`, `replace-all`, and `sed` use whole-file scope.
+- Errors + warnings only. Silent when clean. Silent when linter-bundle is not active (safe on all project types).
 
 ### style checking — automatic per-edit and on-demand
 
@@ -349,7 +400,7 @@ When a tool fails partway through, it returns structured context so the LLM can 
 
 ### content-anchored editing (`str_replace`, `insert`, `delete-block`, `get-region`)
 - `functionHint` scopes `str_replace` to within a named function body — immune to line-number drift, preferred for JS/C edits
-- `afterHint` starts the search after the first occurrence of a content string — content-stable equivalent of `lineHint`
+- `afterHint` starts the search after the first occurrence of a content string — content-stable equivalent of `lineNumberHint`
 - `betweenHint: { start, end }` restricts the search to between two anchor strings — useful for switch cases, struct blocks, `#ifdef` regions
 - `occurrence:N` replaces the Nth match instead of the first — fixes duplicate-pattern confusion without widening `old_str`
 - `fuzzyWhitespace:true` matches ignoring per-line indentation differences and commits using the buffer's actual whitespace — eliminates the most common retry loop
