@@ -24,6 +24,10 @@
       {
         "label": "MCP: Show Edit Stats...",
         "command": "pulsar-edit-mcp-server:show-edit-stats"
+      },
+      {
+        "label": "MCP: Show Fault Log...",
+        "command": "pulsar-edit-mcp-server:show-fault-log"
       }
     ]
   },
@@ -61,6 +65,10 @@
             {
               "label": "Show Edit Stats...",
               "command": "pulsar-edit-mcp-server:show-edit-stats"
+            },
+            {
+              "label": "Show Fault Log...",
+              "command": "pulsar-edit-mcp-server:show-fault-log"
             }
           ]
         }

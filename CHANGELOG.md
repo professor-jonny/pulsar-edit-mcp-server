@@ -1,1396 +1,578 @@
-## 0.10.28
+# pulsar-edit-mcp-server — Work Tracking
 
-### Enhancements
+> Last audited against live code: 2026-06-11 (v0.11.1)
 
-- **`str_replace` auto-retry on whitespace mismatch** — when `old_str` fails to match due to indentation differences and `fuzzyWhitespace` was not explicitly set, the tool now automatically retries with fuzzy whitespace matching. On success the response is tagged `[autoFuzzyWhitespace]` instead of returning a fault. Eliminates the most common class of str_replace failures (~66 lifetime faults).
+## v0.11.1 — Fault log viewer, run-command pre-flight, logFailure context improvements (2026-06-11)
 
-- **`str_replace` auto-retry on Unicode mismatch** — when `old_str` fails after the whitespace retry and `fuzzyContent` was not explicitly set, the tool automatically retries with Unicode normalisation (arrows, smart-quotes, BOM, zero-width chars, box-drawing runs). On success tagged `[autoFuzzyContent]`. Eliminates the recurring `→` arrow encoding failure cluster.
+**New tools:**
+- `get-failure-log` (debugging group) — query `failure-log.ndjson` directly from the LLM. Args: `tail` (default 20, max 200), `tool`, `reason`, `filePath` filters. Returns structured JSON. Complements `get-edit-stats` with per-failure detail. Added to `tool-catalogue.js`.
 
-- Both auto-retries are fully transparent: stats (`fuzzyWhitespaceCommits`, `fuzzyContentCommits`) are bumped as if the flag had been set explicitly, and the response tag distinguishes auto (`autoFuzzyWhitespace`) from explicit (`fuzzyWhitespace`).
+**Fault log viewer UI (`pulsar-edit-mcp-server.js`):**
+- New `showFaultLog()` modal command (**Packages → MCP Server → Show Fault Log...**): reads `failure-log.ndjson`, shows newest-first table with `#`, Time, Tool (cyan), Reason (amber), File, Line, Detail columns. Live filter inputs for tool / reason / file substring. Count badge `X / Y entries` updates with filter. 🗑 Clear Log button with confirm prompt.
+- Row click opens a detail overlay (absolutely-positioned inside the modal element — not a second modal panel). Shows all fields in a grid: `bufferPreview` dark-green, `diffVsBuffer` dark-red, `oldStrPreview` dark-amber monospace blocks. Raw JSON pre block at bottom. `← Back to list` button removes the overlay without closing the parent.
 
-- **`str_replace` auto-retry on trailing comment mismatch** — when `old_str` still fails after the whitespace and Unicode retries, the tool now checks whether the last line of `old_str` has a trailing `/* */` or `//` comment that is absent from the buffer. If so, it strips the comment, retries the match, and on success appends the salvaged comment to `new_str`'s last line as `/* CHECK: <comment> */` so it isn't silently lost. Tagged `[autoStripComment]`. Handles the common LLM hallucination of adding `/* verified */` or similar annotations to `old_str`.
+**`run-command` pre-flight + post-execution (`mcp-registration.js`):**
+- Pre-flight: snapshots all open editor buffers as checkpoints keyed `_run-command-<ts>:<path>`. Saves all modified buffers to disk. Records mtimes of all open files.
+- Post-execution: compares mtimes after process close; reloads any externally-modified files into buffers via `setTextViaDiff`. Result includes `preFlightCheckpoint`, `savedBeforeRun[]`, `reloadedAfterRun[]`.
 
-- **`autoStripCommentCommits` stat counter** — tracks how many `str_replace` commits were rescued by the trailing-comment strip auto-retry. Visible in `get-edit-stats` output alongside `fuzzyWhitespaceCommits` and `fuzzyContentCommits`.
+**`logFailure` context improvements (`mcp-registration.js`):**
+- `str_replace` noMatch/whitespace: `bufferPreview` ±5 lines around hint row, `oldStrPreview` first 6 lines formatted `[1]: ...\n[2]: ...`.
+- `insert` anchorNotFound: `oldStrPreview` = full anchor string, `bufferPreview` = first 15 lines of function scope, `scopeLines` = range description.
+- `replace-block` anchorNotFound: `oldStrPreview` = full anchor, `bufferPreview` = 15 lines from `searchStartRow`.
+- `replace-function-body` notFound: `oldStrPreview` = fn name, `availableFunctions` = first 20 function names, `closestMatches` = near-miss names.
 
-- **`[check-me xN]` health warning in `get-repo-map`** — files containing `/* CHECK: ... */` markers left by `autoStripComment` rescues are now flagged in the repo map health warnings section. Each marker represents a salvaged trailing comment that needs human verification. The LLM sees the count per file and knows to inspect and resolve them.
+**Other:**
+- `open-file` divergence warning added then removed — the post-execution buffer reload in `run-command` is the correct architectural answer (see refactor plan).
+- `replace-across-files` closed-file handling: closed files now opened via `atom.workspace.open(filePath, {activateItem:false})` before `setTextViaDiff`. Full undo history on all affected files; no direct `fs.promises.writeFile` for content edits.
+- `str_replace` similarity fix: closest-region and Levenshtein similarity score now always run on noMatch (was previously gated inside `if (fuzzyRow >= 0)` — dead code on single-line failures and pure noMatch cases).
 
-### Bugs fixed
+## v0.11.0 — Library extraction refactor (2026-06-10)
 
-- **`fuzzyWhitespaceCommits` not bumped on auto-retry** — the auto-retry whitespace block bumped `hintsUsed.fuzzyWhitespace` but missed `fuzzyWhitespaceCommits`, making auto-rescues invisible in the commits counter. Fixed.
+`mcp-registration.js` has been refactored from a single ~8007-line monolith into a set of focused shared libraries. All code moves are pure extractions — no behaviour changes.
 
-- **Duplicate `_oldStrLenSum` reset in stats reset loops** — both the session-flush and lifetime-reset loops contained two identical `_oldStrLenSum = 0` guards with a stale `lineNumberHintAssisted` reset sandwiched between them (dead counter, removed in a prior session). Deduplicated both loops and added the missing `fuzzyContentCommits` and `autoStripCommentCommits` reset guards.
+**Extracted libraries (new files):**
+- `lib/edit-stats.js` (~800 lines) — session/lifetime stats, `bump()`, `bumpStyle()`, `flushLifetimeStats()`, `syncToLifetime()`, `summarise()`, `buildReport()`, `buildStyleReport()`. Also holds `process.on` exit hooks.
+- `lib/tool-hints.js` (247 lines) — `anchorError()`, `smartSuggestion()`, `successNudge()`, `ambiguityCheck()`, consecutive failure counter objects.
+- `lib/buffer-helpers.js` (265 lines) — `walkDir()`, `resolveStructuralAnchor()`, `findAnchor()`, `findFunctionInBuffer()`, `readFileOrBuffer()`, `retargetEditor()`.
+- `lib/lint-helpers.js` (74 lines) — `maybeLintSuffix()`, `lintSnapshot()`.
+- `lib/tool-catalogue.js` (94 lines) — `TOOL_CATALOGUE` array, `TOGGLEABLE_GROUPS` array.
+- `lib/schema.js` (48 lines) — `ANCHOR_SCHEMA`, `STRUCTURAL_ANCHOR_SCHEMA` Zod schemas.
 
-## 0.10.27
+**Result:** `mcp-registration.js` reduced from **8007 → 6693 lines** (−1314 lines, −16%).
 
-### Bugs fixed
+- Chat panel tool result handling fix (`chat-functions.js`): `addToolResultToHistory()` was calling `JSON.stringify(toolResult.content)` where `content` is already a `[{type,text}]` array — the model received raw JSON envelope strings instead of plain text and stopped using tools. Fixed to `content.map(c => c.text ?? '').join('\n')`. Added `isError` handling: prefixes `[tool error]` when `toolResult.isError` is true. Error text now also surfaced in chat display via `updateChatHistory`.
 
-- **`replace-function-body` crashed universally** — handler destructured `name` from args but `name` was never in the Zod inputSchema, so it was always `undefined`. `findFunction(symbols, undefined)` called `.toLowerCase()` on `undefined` and threw before any stats were recorded. Fixed by deriving `_fnName` from the first line of `newBody` (the function signature) with a regex, falling back to `functionHint` if the parse fails.
+**Other changes in v0.11.0:**
+- `grep-file` bug fix: no-match path was missing its `return` statement, causing "Tool execution failed" instead of `{ matchCount: 0 }`. Return envelope fix also required (raw objects silently dropped by MCP SDK).
+- `ANCHOR_SCHEMA` expanded with full v0.10.29 hint set: `inFunction`, `inSymbol`, `afterFunction`, `beforeFunction`, `afterSymbol`, `beforeSymbol`, `afterString`, `beforeString`, `afterLine`, `beforeLine`, `lineContentHint`. All tools using `...ANCHOR_SCHEMA` spread pick up the new hints automatically.
+- Stats UI improvements: `hintsUsed` init block updated with all new hint keys; `buildReport()` now groups tools logically (edit / search / nav / RE / shell); per-tool `pct` (hit%) added to every edit and search tool; group summary objects (`_editGroup`, `_searchGroup`, etc.) added.
+- Stats panel renderer (`pulsar-edit-mcp-server.js`) updated: rescue counters (`fuzzyContent`, `autoStripComment`, `autoPartialMatch`, `rescued`) now visible; `get_structural_anchors` moved from Edit to Search group; search group badge correctly shows misses+faults.
+- `resetLifetimeStats()` function added and exposed; "Reset Lifetime" button added to stats panel.
+- Near-miss rescue counters: `autoPartialMatchCommits` separated from `fuzzyWhitespaceCommits`; `apply_patch.rescuedCommits` now tracked.
+- Redundant post-`buildReport` ghidra/run_command injection removed from `getEditStats()` handler (now data-driven inside `buildReport()`).
 
-- **`str_replace` session hits always 0** — `bump('str_replace', 'hits')` was missing from the commit path entirely. Added immediately after `strReplFailures.count = 0`.
+## Files
 
-- **`replace-all` and `replace-document` missing bump hits/dryRuns** — neither tool called `bump('X', 'hits')` on commit or `bump('X', 'dryRuns')` on dryRun path. Fixed at both commit sites.
-
-- **Most edit tools missing bump hits** — after the universal bump() refactor, `insert`, `delete-line-range`, `delete-block`, `sed`, `apply-patch`, `replace-block`, `replace-across-files` all had no `bump('X', 'hits')` at their success points. Added to all.
-
-- **`$1`/`$2` capture-group backreferences silently broken** in `replace-all`, `replace-across-files`, and `sed` — arrow-function callbacks `() => replacement` bypass JS native `$N` interpolation in `String.replace()`. Added `applyReplacement(rep, m, groups, pre, post)` helper at module scope handling `$1`.`$9`, `$&`, `` $` ``, `$'`. Fixed all 4 call sites.
-
-- **`str_replace` noMatch path returned empty MCP response** — the return object had no `content` key, so the LLM received a silent empty result. Added `content: [{ type: 'text', text: parts.join('\n') }]` as first key in the noMatch return.
-
-- **`fuzzyContent` position overshoot** — after a normalised match, `effectiveOldStr` was sliced using `idx + effectiveOldStr.length` in the *normalised* string but `idx` was in the original buffer. Normalisation removes chars so the slice overshot. Fixed: walk the original buffer forward char-by-char accumulating normalised lengths until `>= normNeedle.length`.
-
-- **`fuzzyContent` didn't set `matchIndex`/`matchLine`** — after finding a position via normalised search, the code fell through to the downstream `indexOf` loop which re-searched on raw buffer and failed for emoji/surrogates. Fixed: set `matchIndex`, `matchLine`, `occurrencesFound = occurrence` immediately after the normalised match.
-
-- **`lineNumberHintFallback` removed** — was silently overwriting whatever happened to be at the lineNumberHint position when `old_str` didn't match, producing 218 silent positional overwrites in lifetime stats. `lineNumberHint` now narrows the search window forward from that line; if the string isn't found it fails with full diagnostics.
-
-- **`wrongOccurrence` diagnostic fired in regex mode** — the `indexOf`-based occurrence scan ran even when `regex:true`, reporting garbage line numbers. Added `if (regex)` early-return with a clean "pattern only matched N time(s)" message.
-
-- **Smart suggestion `if (sugg) parts.push(sugg)` dropped** — this line was accidentally removed during TOOL_CATALOGUE cleanup (duplicate-entry removal session). Consecutive-failure nudges were silently suppressed in all noMatch responses. Restored.
-
-- **`get-structural-anchors` only detected 3-line `/* ===...=== */` banners** — single-line banners like `/* ---- Wi-Fi ---- */` were not detected. Extended loop to check `_slm = line.match(/^\/\*\s*[-=]{3,}\s+(.+?)\s+[-=]{3,}\s*\*\/$/)` on each line individually.
-
-- **`check-function-docs` / `get-function-list-with-comments` attributed section banners as function docs** — fixed in `naming-checker.js` L302–308: `isBanner = /^\/\*\s*[-=]{3,}/.test(opener) && opener.includes('*/')` → banners → `missing` (not `plainDoc`).
-
-- **Mojibake repair** — `mcp-registration.js` had been re-saved at some point as Windows-1252, corrupting 13,176 non-ASCII characters (emoji, arrows, em-dashes) into multi-byte mojibake sequences. Repaired via targeted cluster replacement (`scripts/fix-mojibake-v2.js`) — 727 clusters replaced, 3 fragments fixed manually, 4,443 legitimate unicode preserved.
-
-- **`struct-check` fired on all file types** — `preEditSnapshot` and `postEditDelta` in `edit-response.js` called `structSnapshot` unconditionally. Added `STRUCT_EXTENSIONS` regex gate (`.c .h .js .ts .jsx .tsx .css .scss .java .cs .go .rs .swift`) — struct delta warnings only fire on brace-delimited files.
-
-- **`replace-across-files` subdirectory glob (`test/*.c`) silently returned 0** — `globToRegex()` produces anchored regexes; absolute paths never matched a bare subdirectory prefix. Fixed: also test the path relative to each project root, allowing `test/*.c` to match `C:/proj/test/hal.c`.
-
-- **`replace-function-body` `fails.ambiguousHint` key missing from stats init** — handler bumped `fails.ambiguousHint` at 3 sites but key wasn't in the init object. Added.
-
-- **`delete-block` dryRuns never counted** — two dryRun paths had no `bump('delete_block', 'dryRuns')` call. Added to both.
-
-- **`bump()` hyphen/underscore mismatch** — tools with hyphenated `curTool` names (e.g. `close-file`) looked up `editStats['close-file']` which was undefined; bump silently no-oped. Fixed by adding `const key = toolKey.replace(/-/g, '_')` at the top of `bump()`.
-
-### New features
-
-- **`check-struct` tool** (debugging group) — on-demand absolute structural integrity snapshot for any brace-delimited file: net unclosed `{`, unclosed `/* block comments`, and `#if`/`#endif` depth. Complements the edit-response delta check (which only fires when imbalance gets *worse*).
-
-- **`lineNumberHint` ambiguity guard** — when `lineNumberHint` is set and `old_str` matches more than once in the `±50`-line window, the edit is blocked with a `❌ lineNumberHint ambiguity` response listing every match with a 3-line context preview. Use `occurrence:N` to resolve. Guard bypassed when `occurrence > 1` (caller has declared intent).
-
-- **`lineNumberHint` window capped to `±50` lines** — previously searched from lineNumberHint to EOF. Narrowed to 50 rows each side (`LINE_HINT_RADIUS = 50` constant). Reduces false matches and speeds up large-file searches.
-
-- **Failure capture: `diffVsBuffer` in noMatch response** — when `str_replace` fails with `lineNumberHint` set, the response now includes a `🔬 DIFF` section showing the char-level difference between `old_str` and the actual buffer lines at the lineNumberHint position. Also logged to `failure-log.ndjson` (NDJSON append, grep-queryable).
-
-- **`get-repo-map` file-health flags** — three flags appended to repo map output: `[unicode]` (non-ASCII present), `[mojibake xN]` (corrupted cp1252-as-UTF-8 sequences), `[crlf xN]` (Windows line endings). LLM warned before attempting edits on affected files.
-
-- **`fuzzyContent` box-drawing char normalisation** — runs of `[\u2500-\u257F]` (box-drawing chars like `─ │ ┌`) collapse to `'--'` during normalisation. LLM can write `// -- text --` and match `// -- text ---...`.
-
-- **`$1`/`$2`/`$&` backreference support** in `replace-all`, `replace-across-files`, `sed` — via new `applyReplacement()` helper. Aligns with VS Code / Cline / Claude Code behaviour.
-
-- **Stats UI live refresh** — the Pulsar stats panel now auto-refreshes every 1s via `setInterval` rather than being a one-time snapshot. Timer cleared on Close and End Session.
-
-- **`lineContentHint` parameter on `str_replace`** — content-stable alternative to `lineNumberHint`. Supply a unique string from the anchor line; the tool scans `allLines.findIndex()` for it and scopes the search to a ±50-line window from there. Drift-immune: if lines are inserted above the anchor, the hint still finds the right place. Returns `❌` with a clear message if the string is not found. Counted in the same `hintsUsed.lineNumberHint` bucket for stats.
-
-- **`successNudge` lineNumberHint upgrade suggestion** — when `str_replace` succeeds using only `lineNumberHint` or `lineContentHint` (no `functionHint`/`afterHint`/`betweenHint`) on a file ≥100 lines, the response now appends: `⚡ lineNumberHint is positional and drifts if lines are inserted above it. Next time use afterHint:"<content of matched line>" instead — it's content-stable and won't drift.` The specific `afterHint` string is extracted from the matched line at commit time, so it's immediately usable.
-
-### Docs
-
-- **CHANGELOG, README, package.json, LLM-FAILURE-MODES.md** updated through session 2026-06-08.
-- **`stats-review-after-tree-sitter-migration.md`** rewritten with clean markdown tables, v0.10.25 lifetime stats at session 30.
-- **`mcp-server-refactor-plan.md`** updated: tool framework design, failure capture design, scripted tool execution (3 tiers), struct-check wiring.
-- **`mcp-server-refactor-plan.md`** (2026-06-09): removed two completed TODO items (`lib/string-utils.js` extraction and Levenshtein similarity %); restored missing `### 🔧 MEDIUM — Extend smartSuggestion + logFailure` heading; added `lib/string-utils.js` to Files section; updated audit date.
-- **README.md** (2026-06-09): added `check-struct` tool to Debugging table; added `lib/string-utils.js` to library architecture list; added `fuzzyContent:true` and `regex:true` to `str_replace` table entry; added `get-repo-map` file-health flags (`[unicode]`, `[mojibake]`, `[crlf]`) to Search table; added new "Unicode robustness" section to What makes this different; extended smart failure suggestions section with Levenshtein similarity note; updated `lint` section to reflect always-on behaviour (gate removed in v0.10.25).
-
-- package.json: bumped 0.10.26 -> 0.10.27.
+- `lib/mcp-registration.js` — **~6693 lines.** Full Pulsar restart + babel cache clear required for registerTool/schema changes. Handler body changes hot-reload on save.
+- `lib/edit-stats.js` — Stats counters, `bump()`, `summarise()`, `buildReport()`, `buildStyleReport()`, process exit hooks. Hot-reloads on save.
+- `lib/tool-hints.js` — `anchorError()`, `smartSuggestion()`, `successNudge()`, `ambiguityCheck()`, consecutive failure counters. Hot-reloads on save.
+- `lib/buffer-helpers.js` — Buffer/file utility functions: `walkDir()`, `resolveStructuralAnchor()`, `findAnchor()`, `findFunctionInBuffer()`, `readFileOrBuffer()`, `retargetEditor()`. Hot-reloads on save.
+- `lib/lint-helpers.js` — `maybeLintSuffix()`, `lintSnapshot()`. Hot-reloads on save.
+- `lib/tool-catalogue.js` — `TOOL_CATALOGUE` and `TOGGLEABLE_GROUPS` static data. Hot-reloads on save.
+- `lib/schema.js` — `ANCHOR_SCHEMA`, `STRUCTURAL_ANCHOR_SCHEMA` Zod schemas. Hot-reloads on save.
+- `lib/edit-response.js` — `buildEditResponse()`, `preEditSnapshot()`, `postEditDelta()`. Hot-reloads on save.
+- `lib/struct-check.js` — `snapshot()`, `delta()` for structural integrity checks. Hot-reloads on save.
+- `lib/style-checker.js` — Kernel C style rules, `applyStyleCheck()`, `isKernelFile()`. Hot-reloads on save.
+- `lib/naming-checker.js` — `checkNaming()`, `checkFunctionDocs()`, `buildDocSkeleton()`. Hot-reloads on save.
+- `lib/tree-sitter-symbols.js` — Tree-sitter symbol extraction + anchor resolution. Hot-reloads on save.
+- `lib/string-utils.js` — Pure utilities: `escapeRegex`, `applyReplacement`, `globToRegex`, `levenshteinDistance`, `calculateSimilarity`. Hot-reloads on save.
+- `lib/pulsar-edit-mcp-server.js` — Main UI/activation file. Requires Pulsar reload for most changes.
+- `lib/chat-panel.js` — Chat panel UI. Requires Pulsar reload (no hot-reload).
+- `styles/pulsar-edit-mcp-server.less` — Stylesheet. Hot-reloads on save.
 
 ---
 
-## 0.10.26
+## TODO — Priority Order
 
-### Bug fix — stats persistence: `setInterval` and `beforeunload` listener leaks
-
-Every `/mcp` reconnection caused `mcp-registration.js` to be re-evaluated, registering a new `setInterval` and a new anonymous `beforeunload` listener without ever clearing the old ones. After N connections, N timers were running simultaneously — each holding a reference to its own module instance's `lifetimeStats` object. On window reload all accumulated `beforeunload` listeners fired; the last to run (potentially an old instance with lower counts) won the disk write.
-
-**Fix:**
-
-- Named the `beforeunload` callback (`function _beforeUnloadHandler()`) so `removeEventListener` can reference the exact function object.
-- Saved the `setInterval` return value (`const _flushIntervalHandle = setInterval(...)`).
-- Expanded `deactivate()` to call `clearInterval(_flushIntervalHandle)` and `window.removeEventListener('beforeunload', _beforeUnloadHandler)` before flushing stats to disk.
-
-`deactivate()` is already called by `loadMcpModules()` in `pulsar-edit-mcp-server.js` before `delete require.cache`, so cleanup runs on the old instance before the new one loads — correct order, no change needed to the caller.
-
-- package.json: bumped 0.10.25 → 0.10.26.
-
----
-
-## 0.10.25
-
-### `lib/struct-check.js` — post-edit structural integrity checks
-
-New module `lib/struct-check.js` implements delta-based structural checking fired automatically on every edit to `.c`/`.h` files.
-
-**`snapshot(text)`** captures three metrics before an edit:
-- `braces` — net unclosed `{` count (positive = too many open, negative = too many close)
-- `comments` — count of unclosed `/*` block comments
-- `ifdepth` — net unclosed `#if`/`#ifdef`/`#ifndef` minus `#endif`
-
-**`delta(before, after)`** compares pre- and post-edit snapshots and returns a warning string only when a metric got **worse** — pre-existing imbalances are silently ignored. Output format: `\n⚠️ struct: unmatched opening brace (net +1 { })`. Multiple issues are pipe-separated in a single line.
-
-**`preEditSnapshot(editor)`** and **`postEditDelta(pre, editor)`** in `lib/edit-response.js` updated from stubs to live implementations — both now call into `struct-check.js`.
-
-**`mcp-registration.js`** — `str_replace` commit path wired: `_preSnap = preEditSnapshot(editor)` before the buffer write, `_structSuffix = postEditDelta(_preSnap, editor).struct` after, passed as `struct: _structSuffix` into `buildEditResponse`. The other 14 commit sites still pass `struct: ''` — extension to all tools is the next step.
-
-**Test coverage** — all three metrics confirmed working independently and in combination:
-- Unclosed `{`: `⚠️ struct: unmatched opening brace (net +1 { })`
-- Unclosed `/*`: `⚠️ struct: 1 unclosed block comment (/* without */)`
-- Unclosed `#if`: `⚠️ struct: unclosed #if (depth +1)`
-- Combined brace + `#ifdef`: both issues reported in a single pipe-separated warning
-- All restores produce no struct warning (delta-only confirmed)
-
-**Requires:** Pulsar package reload.
-
-### `lib/edit-response.js` — `buildEditResponse()` + shared edit response infrastructure
-
-New module `lib/edit-response.js` centralises the MCP response envelope that all edit tools return. Previously each tool assembled its own response string inline.
-
-**`buildEditResponse(meta, warnings)`** builds the standard `{ content: [{ type: 'text', text }] }` response:
-- `meta`: `tool`, `line`, `linesChanged`, `scopeLabel`, `tags[]`, `dryRun`
-- `warnings`: `lint`, `style`, `struct`, `nudge` — all optional, all silent when empty
-- Headline format: `✅ str_replace — line 42, +3 lines [fuzzyWhitespace]`
-- Warnings appended only when non-empty (clean edits stay clean)
-
-Wired to all **15 edit commit sites** in `mcp-registration.js`: `str_replace`, `insert`, `delete-line-range`, `delete-block`, `replace-block`, `replace-function-body`, `replace-all`, `replace-document`, `sed`, `apply-patch`, and their dryRun paths.
-
-### Inline linting — always-on (lint gate removed)
-
-`maybeLintSuffix()` in `mcp-registration.js` previously required `lint: true` on every tool call. The gate has been removed — linter output now fires automatically on every edit to a file with active linter-bundle messages in the edited region. Silent when clean or when linter-bundle is not active. The `lint` parameter is accepted but ignored (backwards compatible).
-
-### Failure capture — `noMatch` NDJSON log with `diffVsBuffer`
-
-`str_replace` `noMatch` failures are now logged to `failure-log.ndjson` in the package root (one JSON line per failure, `fs.appendFileSync`, zero deps, grep-queryable).
-
-Each log entry captures: `ts`, `tool`, `reason`, `filePath`, `lineNumberHint`, `hintsSet`, `oldStrPreview` (first line of `old_str`), `diffVsBuffer` (char-level diff of `old_str` lines vs actual buffer lines at `lineNumberHint` — the highest-signal diagnostic field).
-
-`diffVsBuffer` is also included in the **tool response** on failure, so the char-level mismatch is visible immediately without reading the log file.
-
-`failureLogPath` added to `get-edit-stats` return object.
-
-### `str_replace` — `lineNumberHintFallback` removed (correctness fix)
-
-The positional fallback that fired when `lineNumberHint` was set but `old_str` didn't match has been **deleted** (~58 lines). `lineNumberHint` is now a search-narrowing hint only — if `old_str` doesn't match the buffer, the tool fails with full diagnostics (diffVsBuffer, closest area, whitespace analysis). The old fallback was silently overwriting whatever happened to be at the line number, regardless of content. Lifetime stat `lineNumberHintFallback: 218` = 218 silent wrong-content writes.
-
-The `[lineNumberHintFallback]` tag and `lineNumberHintFallback` stat key are removed.
-
-### Stats — universal `bump()` refactor + completeness audit
-
-`bump(toolKey, subPath, n)` now normalises hyphenated tool keys to underscored stat keys (`'close-file'` → `'close_file'`) so all tools resolve correctly regardless of naming convention. Previously hyphenated tools silently dropped all stats.
-
-Missing `bump` calls discovered and fixed across multiple tools:
-- `replace_function_body`: missing `hits` and `dryRuns` bumps
-- `replace_all`: missing `hits` and `dryRuns` bumps
-- `replace_document`: missing `hits` bump
-- `delete_block`: missing `hits` bump on `startContent`/`endContent` commit path; missing `dryRuns` on both dryRun paths; missing `hintsUsed.startContent`
-- `replace_function_body` stats init: missing `hits: 0` key (caused hits to be `undefined`, dropped from output)
-- `fuzzyWhitespaceCommits`: duplicate declaration removed from stats init
-
-Stats init audit: `replace_function_body.fails` added `ambiguousHint: 0` (handler was bumping it but key was missing from init).
-
-### TOOL_CATALOGUE — duplicate entries removed + RESPONSE FORMAT added
-
-- Removed duplicate entries for `str_replace`, `insert`, `replace-function-body`, `get-structural-anchors` (old versions without RESPONSE FORMAT descriptions were stale copies)
-- Added `RESPONSE FORMAT` descriptions to `replace-document`, `delete-line-range`, `delete-block`, `replace-block`, `replace-all`, `apply-patch`
-- Added missing `sed` entry (was absent from TOOL_CATALOGUE entirely)
-- `replace-function-body` description updated: removed stale `lint:true` opt-in wording, now shows RESPONSE FORMAT and notes lint runs automatically
-
-### Bug fixes
-
-- **`str_replace` `noMatch` response missing `content` key** — the noMatch return path had `{ matched: false, strReplFailures: count }` with no `content` key. MCP protocol returned an empty response to the LLM. Fixed: added `content: [{ type: 'text', text: parts.join('\n') }]` as first key. This also made `diffVsBuffer` visible — it was implemented but never reachable.
-- **`str_replace` duplicate `if (sugg) parts.push(sugg)`** — removed one copy.
-- **`fuzzyContent` effectiveOldStr length overshoot** — `substring(idx, idx + effectiveOldStr.length)` used raw length but `idx` was in the normalised haystack. Fixed: walk `searchText` char-by-char from `idx` accumulating normalised lengths until consumed ≥ `normNeedle.length`, then slice.
-- **`str_replace` `wrongOccurrence` diagnostic broken in regex mode** — entered the `indexOf`-scan diagnostic block even when `regex: true`, producing garbage line numbers. Fixed: added early-return path for regex mode that emits a clean `"pattern only matched N time(s)"` message.
-- **`str_replace` garbled `require` block** — `str_replace` on the import block (L9–11) caused two `require` lines to merge onto one line. Recovery: `delete-line-range` + `insert`. Lesson: use delete+insert for single-line fixes in the `require` block — `str_replace` is unreliable there due to long line lengths.
-
-**Requires:** Pulsar package reload (new module `lib/struct-check.js`; `lib/edit-response.js` now live instead of stub-only).
-
-- package.json: bumped 0.10.23 → 0.10.25.
+| # | Priority | Item | Notes |
+|---|---|---|---|
+| 1 | 🏗️ LARGE | Tool Framework `lib/tool-framework.js` | Next major item. See full design below. |
+| 2 | 📋 LARGE | Tool Framework — per-tool feature plan | Before/during framework build: document each tool's features as a checklist so nothing gets lost in the migration. Tick off as each is ported. See note below. |
+| 3 | 📁 MEDIUM | File context staleness warning | Buffer version tracking. See design below. |
+| 4 | 🖼️ MEDIUM-HIGH | Visual diff decorations (Cursor-parity) | Inline editor green/red decorations. See design below. |
+| 5 | 📊 MEDIUM | Show diff faults in stats like window | Idea: surface diff-fault breakdown in `get-edit-stats` the same way the hint window shows — e.g. per-rule fault counts rendered as a mini table/window. Needs design. |
+| 6 | 🔍 MEDIUM | Capture fuzzy trigger detail in edit stats | When a fuzzy auto-retry fires (fuzzyWhitespace, fuzzyContent, autoPartialMatch), capture *what* caused it — the diffVsBuffer or a short "reason token" — so `get-edit-stats` can show "autoFuzzyWhitespace x3: trailing space on line N" rather than just a count. Helps distinguish real encoding mismatches from stale old_str. |
+| 7 | 🔤 LOW-MEDIUM | Case-insensitive fuzzy matching in str_replace | When str_replace noMatch, optionally retry with case-folded comparison. Use case: LLM sends wrong capitalisation (e.g. `Const` vs `const`). Would be a 5th auto-retry block after partialMatch. Need to assess false-positive risk — case matters in most languages. |
+| 8 | 🖼️ MEDIUM | Inline diff in chat panel | See design below. |
+| 9 | 🚫 MEDIUM | Pulsar ignore / `.mcp-ignore` | See design below. |
+| 10 | 🔧 LOW | Named capture groups `$<name>` in `applyReplacement` | Low priority quality-of-life. |
+| 11 | 🧪 MEDIUM | Automated testing + script runner (Tier 1/2/3) | See design below. |
+| 12 | 💾 LOW | Disk-backed checkpoints | See design below. |
+| 13 | 🔀 LOW | Git integration tool | See design below. |
+| 14 | 🔍 MEDIUM | grep-project fails on mcp-registration.js | Investigate: grep-project appears to fail or return partial results on `mcp-registration.js` specifically (8007 lines, CRLF, heavy Unicode). May be a line-length or encoding issue in the search backend. Reproduce + root-cause before fixing. |
+| 15 | 📝 LOW | Document string anchors for unstructured files | See note below. |
 
 ---
 
-## 0.10.24
+### ✅ DONE — Extend `smartSuggestion` + `logFailure` to remaining edit tools
 
-### Tree-sitter migration — complete
-
-The regex-based function detection era is fully over. All remaining regex-based function-matching sites outside of intentional Ghidra support have been migrated to `tree-sitter-symbols.js`.
-
-- `naming-checker.js` (`checkNaming`, `checkFunctionDocs`): `FN_DEF_RE` removed. Both functions now use `getSymbolsFromText` + `fnByRow` Map pattern for O(1) per-line lookups. `FN_DEF_RE` constant and its `module.exports` entry removed.
-- `mcp-registration.js` `insert-function-doc`: replaced two `FN_DEF_RE_REG` calls with a single `getSymbolsFromText` + `findFunction` call.
-- Migration complete across all files. Only intentional regex remaining: `GHIDRA_FUNC_RE` (decompiled C placeholder names have no tree-sitter grammar support).
-
-This is the v0.10.21 work that was correctly versioned at the time. Package version was bumped 0.10.22 → 0.10.23 for the Unicode suite; 0.10.24 covers the tree-sitter completion milestone and the library extraction work that followed.
-
-### Library extraction — shared helper modules
-
-The long-term goal of making each tool a declarative config object powered by shared libraries began in earnest this version. Functions previously inlined in `mcp-registration.js` were extracted into dedicated modules:
-
-- **`lib/style-checker.js`** — already existed; `checkLines`, `formatViolations`, `isKernelFile`, `applyStyleCheck` now imported cleanly.
-- **`lib/naming-checker.js`** — `checkNaming`, `checkFunctionDocs`, `buildDocSkeleton`, `formatNamingViolations`.
-- **`lib/tree-sitter-symbols.js`** — `getSymbols`, `getSymbolsFromText`, `findFunction`, `resolveAnchor`, `braceEndRow`.
-- **`lib/edit-response.js`** — `buildEditResponse`, `preEditSnapshot`, `postEditDelta` (stubs, to be populated in v0.10.25).
-
-The remaining module-scope helpers in `mcp-registration.js` (`maybeLintSuffix`, `smartSuggestion`, `successNudge`, `ambiguityCheck`, `bump`, `anchorError`, `isCodeFilePath`, `lintSnapshot`) are candidates for the next extraction phase once the Tool Framework (lib/tool-framework.js) design is finalised.
-
-- package.json: 0.10.23 is the last public tag; 0.10.24 is the internal milestone version for this work.
+Completed 2026-06-09. `logFailure` and `smartSuggestion` now wired to `replace-block`, `insert` anchorNotFound, and `replace-function-body` notFound. All main edit tools covered.
 
 ---
 
-## 0.10.23
+### 📋 Tool Framework — per-tool feature plan
 
-### `str_replace` — Unicode robustness suite (Stages 1–3)
+Before starting the framework migration, create a checklist document (or a section here) that lists every tool by name with its features ticked: `dryRun`, `lint`, `styleCheck`, `consecutiveFailureCounter`, `smartSuggestion`, `buildEditResponse`, `logFailure`, `stats keys`. Use this as the migration ledger — each tool gets a row, features get columns, tick off as each is ported to `registerMcpTool()`. This prevents features from silently dropping during the rewrite of an 8000-line file.
 
-Three new matching modes address a long-standing failure class where LLM-generated `old_str` contains Unicode characters that differ from what the buffer contains — smart quotes vs straight quotes, em dashes, non-breaking spaces, zero-width characters, and emoji. These were previously untraceable `noMatch` failures.
+**Suggested format:**
 
-#### Stage 1 — `fuzzyContent:true` (Unicode normalisation)
+| Tool | dryRun | lint | styleCheck | failCounter | smartSugg | logFailure | migrated |
+|---|---|---|---|---|---|---|---|
+| str_replace | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| insert | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| ... | | | | | | | |
 
-- Normalises both `old_str` and the buffer to ASCII-equivalent before matching: BOM, zero-width/soft-hyphen, NBSP → space, smart single/double quotes → straight, en/em dash → hyphen, surrogate pairs (emoji) stripped.
-- Match found on the normalised string; replacement slices from the **original** buffer at the discovered position — buffer content is preserved exactly, only the search is normalised.
-- New stat: `fuzzyContentCommits` — counts how often this path saved a retry.
-- Schema: `fuzzyContent: z.boolean().optional()`. Requires Pulsar package reload.
-
-#### Stage 2 — `lineNumberHintFallback` (position-based auto-rescue)
-
-- When exact match fails AND `lineNumberHint` is set, the handler falls back to a direct positional replace at the line hint row — no content match required.
-- Intended for encoding-agnostic situations where the tool knows exactly where the target line is (e.g. from a prior `grep-file` result) but the buffer content contains unpredictable Unicode.
-- Success response tagged `[lineNumberHintFallback]` to signal the caller this path was used.
-- New stat: `lineNumberHintFallback` — counts blind-positional fallback commits.
-- **Caution:** a wrong `lineNumberHint` will silently corrupt. The tag in the response signals the caller.
-- Requires Pulsar package reload (new schema key).
-
-#### Stage 3 — `regex:true` (LLM escape hatch)
-
-- Treats `old_str` as a JavaScript `/gm` regular expression. Use `.` to wildcard single problematic chars (em dash, smart quotes), `.*` for spans, `\*` for literal asterisk.
-- Invalid patterns return a clean error with the JS error message.
-- Success/dryRun responses tagged `[regex]`.
-- New stat: `regexCommits`.
-- `occurrence:N` applies to regex matches; `lineNumberHint` provides the search window.
-- When both `regex:true` AND `lineNumberHint` are set: Layer 2 (lineNumberHintFallback) fires first if the regex finds no match — lineNumberHint is the stronger signal. To force regex-only, omit `lineNumberHint`.
-
-#### Test coverage
-
-All six Unicode character classes confirmed passing against `test/fuzzy_content_test.c`: smart double quotes (U+201C/D), em dash (U+2014), en dash (U+2013), NBSP (U+00A0), smart single quote (U+2019), zero-width space (U+200B). All three paths confirmed: match+commit, dryRun, invalid pattern error.
-
-**Requires:** Pulsar package reload (schema changes in all three stages).
-
-- package.json: bumped 0.10.22 → 0.10.23.
+**Complexity:** Low prep work, high value as a migration safety net.
 
 ---
 
-## 0.10.22
+### 📝 LOW — Document string anchors for unstructured files
 
-- **Bug fix: `get-structural-anchors`** — handler was referencing `resolvedPath` and `text` variables that were not declared in its scope. Introduced during the v0.10.20 tree-sitter migration when the function-ends block was updated to call `getSymbols()` but the variable declarations were not updated to match.
-  - Fix: replaced `let buffer` declaration with `let buffer, _gsEditor, _gsText, _gsPath`. Both the `filePath` and active-editor branches now populate all four variables. The `filePath` branch also gained the open-editor lookup needed for tree-sitter to use the live buffer when the target file is already open.
-  - Stale duplicate comment block (`// ── Function ends ──` / `// Use the existing C-function finder...`) cleaned up.
-  - Requires Pulsar restart (handler closures already bound — hot-reload insufficient).
-- **Full tree-sitter tool audit** — all tools verified after v0.10.20–v0.10.21 migration:
-  - `get-structural-anchors` (active editor + `filePath:` variant), `get-function-body`, `search-functions`, `get-function-list-with-comments`, `read-lines` (all hint variants), `str_replace` (functionHint dryRun), `replace-function-body` (dryRun), `insert` (functionEnd dryRun), `get-file-summary`, `checkpatch`, `check-function-docs`, `namingcheck`, `grep-file`, `get-edit-stats`, `get-repo-map` — all pass.
-  - `afterHint` correctly resolves to end of named function (not first char occurrence).
-  - `betweenHint` correctly spans from end of start-function to end of end-function.
-  - No other stale variable references found — full `resolvedPath` scan returns 0 hits post-fix. All `getSymbols()` / `resolveAnchor()` call sites verified to have correct variables in scope.
+**Status:** Already implemented — `afterHint` and `betweenHint` accept arbitrary strings and do a text scan, not just symbol names. The gap is LLM awareness.
 
-## 0.10.21
-
-- **naming-checker.js: FN_DEF_RE removed** — last regex-based function detection outside of tree-sitter-symbols.js eliminated.
-  - `checkNaming`: pre-computes `fnByRow` Map via `getSymbolsFromText` at function entry; per-line `FN_DEF_RE` match replaced with O(1) Map lookup.
-  - `checkFunctionDocs`: header sidecar scan replaced with `getSymbolsFromText`; main loop uses same `fnByRow` Map pattern.
-  - `FN_DEF_RE` constant and block comment removed; removed from `module.exports`.
-- **mcp-registration.js: insert-function-doc** — replaced two `FN_DEF_RE_REG` calls (hintLine check + full-scan fallback) with a single `getSymbolsFromText` + `findFunction` call. `FN_DEF_RE` removed from `naming-checker` import.
-- Tree-sitter migration now complete across all files. Only intentional regex remaining: `GHIDRA_FUNC_RE` in mcp-registration.js (decompiled C placeholder names have no grammar support).
-
-## 0.10.20
-
-- **tree-sitter migration complete**: all 6 remaining regex function-matching sites in mcp-registration.js now use `getSymbols`/`getSymbolsFromText`/`findFunction` from `tree-sitter-symbols.js` with regex fallback.
-  - `findFunctionInBuffer`: rewired to `getSymbols` + `findFunction` — fixes `functionHint` scoping for str_replace, insert, sed, delete-block, get-region, read-lines (9 call sites).
-  - `get-function-body`: replaced `ghidraFindFn` + manual brace-walk with `getSymbols` + `findFunction` — correct `endRow` via tree-sitter.
-  - `list-functions` / `search-functions`: replaced `GHIDRA_FUNC_RE` loops with `getSymbols`.
-  - `list-project-functions`: replaced `fnRe` loop with `getSymbolsFromText` — picks up JS/registerTool patterns.
-  - `get-repo-map` regex fallback: replaced inline `cFnRe`/`jsFnRe` loop in `extractSymbols` with `getSymbols`/`getSymbolsFromText` — now includes `REGISTER_TOOL_RE` for closed JS files; open editors use the fixed ancestor-traversal tree-sitter path.
-- Import updated: added `getSymbolsFromText` to require from `./tree-sitter-symbols`.
-- Removed now-unused `cFnRe` and `jsFnRe` local declarations in `get-repo-map`.
-- Removed orphaned old-body fragment after `replace-function-body` on `findFunctionInBuffer` — tree-sitter mis-reported `endRow` on mcp-registration.js due to `export const` ES module syntax in a CommonJS file. Cleaned with `delete-line-range`.
-- `node --check` clean. Hot-reload sufficient (no schema changes).
+**Action:** Add a worked example to the `str_replace`/`insert` tool description covering markdown/config use cases, e.g. `afterHint:"## Installation"` to insert after a heading. One-line addition to TOOL_CATALOGUE description strings.
 
 ---
 
-## 0.10.19
+### 📁 MEDIUM — File context staleness warning (Pulsar buffer version tracking)
 
-- README: added `## What makes this different` showcase section after `## Why this exists`. Covers ambiguity guard, smart failure suggestions, content-anchored editing, per-tool edit stats, self-updating project memory (session-notes + get-repo-map), `@//` shortcuts, inline C style checking, Ghidra integration, and apply-patch fuzzy rescue. Each feature has a heading, emoji, and competitive callout.
-- README: cleaned up intro paragraph (removed rough draft lines 5–8, tightened description).
-- package.json: bumped 0.10.18 → 0.10.19.
+**Problem:** If the user edits a file in Pulsar between two LLM tool calls (e.g. manually fixes a line after a bad edit, or saves from an external tool), the LLM's mental model of the file is stale. The next `str_replace` or `replace-function-body` will use the old context. Currently we give no warning — the edit either silently hits the wrong place or fails with a confusing noMatch.
 
----
+The thing to note here is that we mostly use hints as anchor points not line numbers so this has limited uses except for calls without hints, but it is still good for context so the LLM is aware of this.
 
-## 0.10.18
+This also could be handy for multiple LLMs working on the same content as it is technically possible to have multiple http mcp clients connected at the same time.
 
-- README: documented model selector (searchable combobox, alphabetical sort, upward dropdown), model persistence across restarts, and ✕ clear button — features from v0.10.7 and v0.10.12 that were missing from the Chat panel section.
-- package.json: bumped 0.10.17 → 0.10.18.
+Pulsar's `TextBuffer` exposes `buffer.changeCount` (increments on every change) and `buffer.isModified()`. We already hold a reference to the live buffer in every tool handler.
 
----
-
-## 0.10.17
-
-- README: documented `@//` shortcuts in the Chat panel section.
-- mcp-server-refactor-plan.md: removed `@//` shortcuts item and detail section (implemented in v0.10.16).
-- package.json: bumped 0.10.16 → 0.10.17.
+**Implementation:**
+1. Add a `Map<filePath, changeCount>` (`fileReadVersions`) at module scope, cleared on server start.
+2. In `read-lines`, `get-document`, `grep-file` commit paths: record `fileReadVersions.set(filePath, buffer.changeCount)`.
+3. In `str_replace`, `replace-function-body`, `insert`, `delete-line-range` commit paths: before applying, check if `buffer.changeCount !== fileReadVersions.get(filePath)`. If so, prepend warning: `"⚠️ stale context: file has changed since last read (buffer version +3). Verify your old_str still matches before proceeding."`.
+4. Clear the entry when a write tool succeeds — record the post-write changeCount immediately to avoid false positives on our own edits.
 
 ---
 
-## 0.10.16
+### 🚫 MEDIUM — Pulsar ignore / file exclusion (`.mcp-ignore`)
 
-### Added
-- **`@//` chat shortcuts** — type `@//` in the chat input to open a shortcut picker dropdown. Shortcuts are defined in a `shortcuts.md` file in the project root using named blocks:
-  ```
-  @//shortcut-name {
-    freeform prompt text sent to chat on expand
+**Problem:** `replace-across-files`, `grep-project`, `get-project-files`, `get-repo-map` currently have no file exclusion beyond the `.mcp-baseline/` glob guard in replace-across-files. On large projects with `node_modules`, build output, or generated files, tools return noise and waste tokens.
+
+**Proposed:** A `.mcp-ignore` file at the project root (gitignore syntax). Loaded once at server start, re-loaded on file-save event. Applied as a filter in: `get-project-files`, `grep-project`, `get-repo-map`, `replace-across-files`, `list-project-functions`.
+
+Default exclusions baked in (no `.mcp-ignore` needed): `node_modules/**`, `.mcp-baseline/**`, `*.min.js`, `dist/**`, `build/**`.
+
+**Implementation:** ~50 lines. Use `micromatch` (already a dependency via globToRegex) or a simple gitignore-style line parser. Single `shouldIgnore(filePath)` helper called at each filter point.
+
+---
+
+### 🏗️ LARGE — Tool Framework (`lib/tool-framework.js`) — eliminate per-tool boilerplate
+
+**Status:** Design complete (2026-06-06). Not yet started.
+
+**Problem:** Every tool in `mcp-registration.js` hand-rolls the same bookkeeping scaffold:
+
+- `editStats` / `lifetimeStats` init — declared per-tool at module scope (~L93–300). Adding a fail reason touches 3 places: init, `summarise()`, `buildReport()`.
+- Instrumentation call sites inside each handler — `bump()`, `counter.count++/=0`, `smartSuggestion(...)`, `buildEditResponse(...)`, `dryRuns` bump. A cross-cutting change (e.g. the `dryRuns` fix) required touching every handler.
+- `summarise()` and `buildReport()` hand-enumerate every tool explicitly — adding a tool means updating them too.
+
+This is the root cause of most stat bugs fixed in v0.10.24 and the bump refactor session.
+
+**Proposed fix:** `lib/tool-framework.js` — a `registerMcpTool()` wrapper. Each tool becomes a declarative config object; the framework handles all cross-cutting concerns automatically.
+
+**Tool config shape:**
+
+```js
+registerMcpTool(server, {
+  name:     'str_replace',
+  group:    'edit',
+  category: 'edit',            // 'edit' | 'search' | 'command' | 'nav'
+  features: {
+    dryRun:                    true,
+    lint:                      true,
+    consecutiveFailureCounter: true,
+    smartSuggestion:           true,
+    buildEditResponse:         true,
+    styleCheck:                true,
+  },
+  stats: {
+    fails:     ['noMatch', 'whitespace', 'partialMatch', 'ambiguous',
+                'outOfScope', 'afterNotFound', 'wrongOccurrence'],
+    hintsUsed: ['functionHint', 'afterHint', 'lineNumberHint', 'betweenHint',
+                'occurrence', 'fuzzyWhitespace'],
+    extras:    ['fuzzyWhitespaceCommits', 'fuzzyContentCommits',
+                'regexCommits', 'lineNumberHintFallback', '_oldStrLenSum'],
+  },
+  inputSchema: { old_str: z.string(), new_str: z.string(), ...ANCHOR_SCHEMA },
+  description: [...],
+  handler: async (args, ctx) => {
+    // ctx provides: editor, buffer, allLines, text, allSymbols
+    //               bump(subPath, n)   — pre-namespaced to this tool
+    //               fail(reason, msg) — bump + counter++ + smartSuggestion + return error
+    //               commit(meta)      — counter=0 + bump hits + buildEditResponse + style/lint
+    //               dryRunReturn(p)   — bump dryRuns + return preview
+    //               consecutiveFailures — the { count } object
+    // Handler contains ONLY the tool-specific logic — no bookkeeping.
   }
-  ```
-  Continue typing after `@//` to filter by name. Enter or click to expand the shortcut body inline into the input for editing before send. Escape dismisses. File is re-read on every trigger — edits take effect without reload.
-- **`shortcuts.md`** — new project-root file format. Stack multiple `@//name { ... }` blocks. Plain text, editable in Pulsar without touching source. **Auto-created with sample shortcuts on first chat panel open** if the file does not exist in the project root.
-
-### Changed
-- `chat-panel.js`: added `fs`/`path` requires, `parseShortcuts()` parser, shortcut dropdown element + render/filter logic, updated `keydown` and `input` handlers.
-- `styles/pulsar-edit-mcp-server.less`: added `.shortcut-dropdown`, `.shortcut-item`, `.shortcut-empty` styles.
-
-**Requires:** Pulsar package reload (chat-panel.js does not hot-reload).
-
----
-
-## 0.10.15
-
-- pulsar-edit-mcp-server.js: `restartServer()` now awaits the `listening` event on the HTTP server before calling `startMcpClient()`. Previously the client tried to connect before the server had fully bound to the port, causing a silent connection failure and leaving `chatPanel.mcpClient` null. `listenToggle()` uses the same `once('listening')` pattern.
-- chat-functions.js: `tools` and `tool_choice` are now only added to the request body when `availableTools.length > 0`. Sending an empty tools array causes some OpenRouter models to error or behave unexpectedly.
-
-## 0.10.14
-
-- chat-panel.js: model dropdown was invisible after reload because the `focus` handler had `if (allModelIds.length)` guard — if `fetchModels()` failed or hadn't resolved yet, focusing the input did nothing. Now on focus with empty list it retries `fetchModels()` immediately, shows "Loading models…" placeholder during fetch, then opens the dropdown. Also handles the case where apiKey was set after the panel first opened.
-
-## 0.10.13
-
-- chat-functions.js: exported `clearMcpTools()` which resets the module-level `mcpTools` cache to null. Previously the tool list was fetched once and cached forever — after a server restart the new MCP session would try to call tools against the stale cache or skip fetching entirely.
-- chat-panel.js: `setMcpClient()` now calls `clearMcpTools()` so the tool list is re-fetched from the new session on the next send.
-- chat-panel.js: imported `clearMcpTools` from `./chat-functions`.
-- styles: `.model-combo-list` now has `display: none` in CSS as the default state (belt-and-suspenders with the JS `style.display = 'none'`). Dropdown `bottom` changed to `calc(100% + 2px)` to clear the full combo row height not just the input.
-
-## 0.10.12
-
-- chat-panel.js: Model selector now persists the selected model via `atom.config.set('pulsar-edit-mcp-server.lastSelectedModel')`. On restart the saved model is restored immediately into the input before the model list loads. If the saved model is still in the list it is kept; otherwise falls back to the first alphabetical model.
-- chat-panel.js: Added ✕ clear button beside the model input. Clears the selection and the persisted value, returns focus to the input.
-- styles: `.model-combo-row` flex layout, `.model-combo-clear` styling for the clear button.
-
-## 0.10.11
-
-- pulsar-edit-mcp-server.js: `restartServer()` and `listenToggle()` now use `this.chatPanel || chatPanelRef` when starting the MCP client. `this.chatPanel` is null after a warm restart (opener doesn't re-run), causing `setMcpClient()` to never be called on the existing panel. `chatPanelRef` is always kept current via the pane scan in `activate()`.
-- chat-panel.js: MCP-not-connected warning now shows only once per disconnect (guarded by `_mcpWarnShown` flag). Flag resets when `setMcpClient()` is called so it will warn again if MCP drops later.
-
-
-- chat-functions.js: `apiEndpointPrefix` and `apiKey` are now read from settings on every call instead of frozen at module load time. Changing either setting in Preferences now takes effect immediately without a package reload. `fetchModels` also re-fetches on every open of the model combobox (no stale cache after an endpoint change). Error messages from model-list failures now also include the HTTP status and body.
-
-## 0.10.9
-
-- chat-functions.js: HTTP error responses now read the JSON body for the actual error message. Previously `!response.ok` threw `Error: Error:` (empty statusText from HTTP/2). Now shows e.g. `HTTP 429: Rate limit exceeded`.
-
-## 0.10.8
-
-- Chat panel: removed hard block on send when MCP server is not connected. Chat now works without MCP; a warning is shown but the message is still sent. Tools are unavailable when MCP is down but plain LLM chat is unaffected.
-
-## 0.10.7
-
-- Chat panel model selector replaced with a searchable combobox. Models are sorted alphabetically on load. Typing in the input filters the list in real time. Dropdown opens upward above the input field. Selected model is highlighted in the list.
-
-
-### Changed
-- `check-function-docs`: each result entry now includes `signature` (full function definition line) and `inHeader` (bool — true if the function name appears in the corresponding `.h` file). Output report shows `[in header]` tag and `sig:` line per entry. `plainDoc` tier now included in report output.
-- `insert-function-doc`: new optional `line` parameter (1-based, sourced from `check-function-docs` output) used as a direct anchor to the function definition — avoids full-file scan and eliminates ambiguity. Falls back to name scan if omitted.
-- `check-function-docs` handler: auto-loads sidecar `.h` file (same name, `.c` → `.h`) to populate `inHeader` detection.
-
-## 0.10.5
-
-### Changed
-- `naming-checker.js` `buildDocSkeleton`: added `Context: Any context.` section to generated kernel-doc skeletons per official kernel-doc spec; handles variadic `...` params as `@...: Description.` per kernel-doc convention
-- `naming-checker.js`: clarified `/* */` comment accuracy — plain block comments are not a style error but are not extracted by the `kernel-doc` tool; `/**` is required for `EXPORT_SYMBOL` / public non-static functions
-- `check-function-docs` tool description updated to document three severity tiers (missing / wrongStyle / plainDoc) and mention the correct kernel-doc sections
-- `insert-function-doc` tool description updated to list `Context:` and variadic `@...` support
-
-## 0.10.4
-
-### `naming-checker.js` — new module
-
-New `lib/naming-checker.js` implementing three kernel-C naming and doc tools:
-
-- **`namingcheck`** — scans a `.c`/`.h` file for naming violations: function names missing a verb-tier prefix (`get_`, `set_`, `init_`, `handle_`, …), camelCase in function or variable names, `#define` macros not ALL_CAPS. File-scope and local-variable checks, block-comment and preprocessor lines skipped. Reports violations with line/col.
-- **`check-function-docs`** — checks every non-static function has a plain `/* */` block comment above it. Flags missing docs and wrong styles (Doxygen `/**` or `@`-tags, `//` comments).
-- **`insert-function-doc`** — inserts a kernel-style `/* */` doc skeleton above a named function, parsing parameter names from the signature. Aborts if a comment already exists.
-
-All three tools are gated on `isKernelFile()` — non-`.c`/`.h` files get a clear skip message.
-
-Stats wired: `namingcheck`, `check_function_docs`, `insert_function_doc` entries in `editStats`.
-
----
-
-## 0.10.3
-
-
-### `insert` — `endOfFile` anchor
-
-Added `endOfFile: boolean` parameter to the `insert` tool. When `true`, resolves the insertion point to `buffer.getLineCount()` (after the last line) without requiring a line number or content anchor. The simplest and most reliable way to append content to a file.
-
-- Added as step **(0)** at the top of the decision ladder in the tool description — checked before `functionEnd`, `afterContent`, and `insert_line`.
-- `dryRun:true` supported — shows the last few lines of the file plus the `►` preview lines.
-- `hintsUsed.endOfFile` counter added to `editStats.insert` for tracking.
-- Does **not** shift any existing line numbers (insertion is always at the end).
-
-## 0.10.2
-
-### Stats: faults vs misses now distinct categories
-
-`get-edit-stats` now separates **faults** (tool misused, bad input, precondition not met) from **misses** (tool ran correctly, content just wasn't there) across all summary groups.
-
-**`summarise()` rewritten with four groups:**
-- **Edit** — `editFaults` excludes `replace_all.noMatch` and `sed.noMatch` (moved to `editMisses`). Summary: `N edit ops: H hits (X%), F faults, M misses`.
-- **Search** — unchanged hits/misses; `get_repo_map.noProject` now counted as a search fault.
-- **RE/Ghidra** — new group. `noEditor`/`notFound` → faults; `noMatch` → misses. Summary only appears when RE tools have been used.
-- **Commands** — new group. `spawnError` → fault; `exitNonZero`/`timedOut` → misses. Summary only appears when commands have been run.
-
-**`run_command` handler:** now bumps `misses.exitNonZero` or `misses.timedOut` at the close site alongside the existing `hits` bump. New keys added to `editStats.run_command.misses`.
-
-**`replace_all` handler:** was silently returning on no-match without bumping anything. Now bumps `fails.noMatch` correctly before the early return.
-
-**`buildReport()`:** `replace_all` entry renamed `failTotal` → `missTotal`. `sed` entry split into `faultTotal` (badExpression + addressNotFound) and `missTotal` (noMatch). `reSummary` and `cmdSummary` added to report when non-null.
-
-## 0.10.1
-
-### Ghidra stats now surface in `get-edit-stats` output
-
-All six `ghidra_*` keys (`ghidra_list_functions`, `ghidra_search_functions`, `ghidra_get_function_body`, `ghidra_get_xrefs`, `ghidra_add_comment`, `ghidra_get_function_list_with_comments`) now appear in both the session and lifetime sections of `get-edit-stats`. Previously they were tracked internally via `bump()` but never included in the report output. Also added the missing `lifetimeReport.run_command` entry (it had a session entry but no lifetime counterpart).
-
-## 0.10.0
-
-### Ghidra tools merged into `mcp-registration.js`
-
-All six Ghidra RE tools (`list-functions`, `search-functions`, `get-function-body`, `get-xrefs`, `add-comment`, `get-function-list-with-comments`) have been merged from the separate `ghidra-tools.js` module directly into the main `mcpRegistration()` function as a `// ── GHIDRA GROUP` block. `ghidra-tools.js` is retained as a dead file but is no longer imported or called.
-
-**What changed:**
-- All Ghidra tools now use `bump()` for hit/fail stats — 6 new `ghidra_*` keys in `editStats`/`lifetimeStats`.
-- All `console.log` calls removed from tool handlers.
-- `get-function-body` and `add-comment` now accept `occurrence:N` to disambiguate when a function name appears more than once.
-- `add-comment` now checks `isGhidraFile()` before running the style checker — decompiled pseudocode no longer triggers spurious style violations.
-- `isGhidraFile(filePath, text)` helper added at module scope — detects `.bin.c`/`.xbe.c` filename patterns and high FUN_/DAT_/PTR_ identifier density.
-- `enable-group` for `ghidra` now calls `mcpRegistration()` inline instead of dynamically importing `ghidra-tools.js`.
-- `pulsar-edit-mcp-server.js` no longer imports or calls `ghidraToolsRegistration` — startup registration happens via the normal `mcpRegistration()` call.
-- `TOOL_CATALOGUE` updated with individual entries for all 6 tools replacing the old `ghidra:*` wildcard placeholder.
-
-**Requires:** full Pulsar restart + babel cache clear (module structure changed).
-
-## 0.9.6
-
-### Navigation — four new tools
-
-- **`close-file`** — Close an editor tab by path. Optional `save: boolean` param (default `false`) saves the file before closing. Stats tracked under `close_file`.
-- **`goto-focus`** — Set one or more cursor positions or selections in the active editor, scrolling the view to bring the location into focus. Accepts an array of `{ startLine, startColumn?, endLine?, endColumn? }` objects (1-based). Stats tracked under `goto_focus`.
-- **`get-project-paths`** — Return the list of root folder paths currently open in the Pulsar project via `atom.project.getPaths()`. Stats tracked under `get_project_paths`.
-- **`add-project-path`** — Add an additional root folder to the Pulsar project without removing existing roots. Guards with `fs.existsSync` — returns an error if the path does not exist. Stats tracked under `add_project_path`.
-
-All four keys added to `editStats` and surfaced in `buildReport()` via the `st()` accessor.
-
-### Bug fix — `getMcpTools` null guard (`chat-functions.js`)
-
-`getMcpTools()` crashed with `TypeError: Cannot read properties of undefined (reading 'listTools')` when `mcpClient` was null (server not started or panel opened before MCP server initialised). Fixed: `getMcpTools()` now returns `[]` immediately when `mcpClient` is null. `chat-panel.js` `handleSend()` also guards early and shows a clear error rather than crashing. LLM chat remains functional without tools — `tool_choice: "auto"` with an empty array produces no tool calls.
-
----
-
-## 0.9.5
-
-### Chat improvements
-
-**Streaming LLM responses (`chat-functions.js`)**
-- `callLLM` now sends `stream: true` and parses the SSE response body via `ReadableStream` + `TextDecoder`.
-- Tokens are appended live into a `.message.assistant.streaming` div — plain text while arriving, then re-rendered through `marked`/`DOMPurify`/`hljs` on finish.
-- Tool-call deltas are accumulated from streamed chunks (`delta.tool_calls[].function.arguments`) and executed exactly as before after the stream closes.
-- `updateChatHistory('Tool', ...)` shows 🔧 tool name before each tool call — carried over from v0.8.3 fix that had been lost.
-
-**Image / vision support (`chat-functions.js` + `chat-panel.js`)**
-- `chatToLLM` accepts a `pendingImages` array; when images are present the user message content becomes a multipart array (`[{type:"text",...}, {type:"image_url",...}]`).
-- `handleSendMessage` accepts and forwards `pendingImages`.
-- `ChatPanel`: paste event on `#chat-input` detects `image/*` clipboard items and attaches them via `_attachImageFile(file)`.
-- Drag-and-drop on `#chat-input` now bifurcates: image files attach as vision inputs, non-image files insert path at cursor (existing behaviour preserved).
-- Image preview strip (`#image-preview-strip`) appears above the textarea showing 64×64 thumbnails; each has an ✕ remove button. Strip clears automatically on send.
-- LESS: `.image-preview-strip`, `.image-preview-item`, `.image-preview-thumb`, `.image-preview-remove`, `.message.assistant.streaming` styles added.
-
-**Also fixed in this pass**
-- `clearContextHistory` now resets to `[{role:"system",...}]` instead of zeroing the array (had reverted to broken state).
-- `max_tokens` now reads `pulsar-edit-mcp-server.maxTokens` config (default 4096) instead of hardcoded 1000 (had also reverted).
-- Removed noisy `console.log` calls from `getMcpTools` and `fetchModels`.
-
----
-## 0.9.4
-
-### Maintainability
-
-- Added `sumFails(obj)` helper at module scope — replaces 32 inline `Object.values(x.fails).reduce((a,b)=>a+b,0)` expressions across `buildReport`, `summarise`, and the `editFails` sum block. Handles undefined/null gracefully so callers need no inline `||{}` guards.
-- Added `const st = key => stats[key] || {}` inside `buildReport` — replaces all `(stats.foo||{hits:0}).hits` / `(stats.foo||{hintsUsed:{}}).hintsUsed||{}` / `(stats.foo||{dryRuns:0}).dryRuns` guard chains for the 13 optional-key tools.
-- Removed redundant `|| ""` from all 7 `applyStyleCheck(x, editor.getPath() || "")` call sites — `applyStyleCheck` already guards `null` internally.
-- Fixed 9 literal `$1` survivors in `buildReport` left by a prior regex replace-across-files pass that did not expand backreferences.
-
----
-
-## 0.9.3
-
-### Maintainability
-
-- Promoted `summarise`, `buildReport`, and `buildStyleReport` from inner closures inside the `get-edit-stats` MCP handler to module-scope functions. `getEditStats()` now delegates to these shared helpers instead of duplicating ~115 lines of arithmetic. Single source of truth for all stats formatting.
-
----
-
-## 0.9.2
-
-### Maintainability
-
-- Extracted `maybeLintSuffix(lint, editor, startRow, endRow)` async helper in `mcp-registration.js`. Replaces 13 identical inline IIFE patterns (`lint ? await (async () => { ... })() : ""`) across str_replace, insert, delete-line-range, delete-block, replace-block, replace-function-body, replace-all, sed, and apply-patch handlers.
-
----
-
-## 0.9.1
-
-### Maintainability
-
-- Extracted `CODE_FILE_RE` constant and `isCodeFilePath(p)` helper in `mcp-registration.js`. Replaces 20 identical inline `/\.(js|ts|jsx|tsx|c|cpp|h|cs|py|java|go|rs)$/i.test(...)` expressions spread across the file — extension list now maintained in one place.
-
----
-
-## 0.9.0
-
-### Code review — bug fixes and reliability improvements
-
-Full line-by-line review of `mcp-registration.js`. All red and yellow items resolved.
-
-**Bugs fixed:**
-
-- **`smartSuggestion` broken for `delete-block`** — all four failure paths were passing `toolName: "delete-line-range"` and incrementing `deleteFailures` (shared with `delete-line-range`). Added a separate `deleteBlockFailures` counter, fixed all failure sites to pass `toolName: "delete-block"`, added a `"delete-block"` branch to the no-hints nudge section, and added `"delete-block"` to the tool-switch escalation map. `delete-block` failures now give specific, actionable guidance instead of silently suggesting the wrong tool.
-
-- **`bump('find_text', 'fails', 'noMatch')` wrong call signature** — third argument was treated as `n` (increment value), not a sub-key. `find_text` miss counts were never incremented. Fixed to `bump('find_text', 'fails.noMatch')` at both call sites.
-
-- **Unconditional hint bumps in `delete-block`** — `hintsUsed.preprocBlock`, `hintsUsed.functionHint`, and `hintsUsed.occurrence` were bumped unconditionally in both the structural-anchor and content-anchor paths regardless of whether those hints were actually provided. All three are now guarded (`if (preprocBlock)`, `if (functionHint)`, `if (occurrence > 1)`). Also added a missing `hintsUsed.startContent` bump in the content-anchor path.
-
-**Reliability fixes:**
-
-- **`lintSnapshot` view mode leak on throw** — `lbUiPanel.viewMode` was mutated before `lbTool.execute()` with no `finally` guard. If `execute()` threw, the panel was left in `"file"` mode permanently. Wrapped in `try/finally`.
-
-- **`import` statement out of order** — `import { CompositeDisposable, Disposable } from "atom"` was stranded after `const IS_WINDOWS` and `function getShell()` declarations. Moved to the top import block.
-
-- **`delete-line-range` schema had unused `filePath` param** — accepted in `inputSchema` but never destructured or used by the handler. Removed from schema to avoid misleading callers.
-
-- **`_failureSuggestion` dead shim removed** — legacy wrapper around `smartSuggestion`, underscore-prefixed, never called. Deleted.
-
-- **`_ANCHOR_DESC` dead constant removed** — planned refactor that was never completed. Deleted.
-
-- **`curTool` shadow in `checkpatch` handler removed** — inner declaration duplicated the outer value. Deleted the inner one.
-
-- **`getShell()` `flag` was discarded and hardcoded inline** — `getShell()` returned `{ shell, flag }` but only `shell` was destructured; the spawn call hardcoded `'-Command'`/`'-c'` directly. Now destructures `{ shell, flag }` and uses `flag` in `spawnArgs`.
-
-- **Duplicate comment removed** — exact duplicate of the "Flush lifetime stats" comment above the `process.on('exit')` handler.
-
-**Code clarity:**
-
-- **`bump()` comment corrected** — comment incorrectly stated lifetime stats are synced on every direct `editStats` write. Corrected to accurately describe when sync actually occurs: every 5s via `setInterval`, on every `get-edit-stats` call, on flush events (`beforeunload`/`deactivate`), and on `process.exit`/SIGTERM/SIGHUP.
-
-- **`findFunctionInBuffer` brace scanner limitation documented** — added inline comment noting the character-level scan does not skip string literals, comments, or regex — a `{` inside these can give a wrong `endRow`. Low frequency in practice but `functionHint` scoping in `str_replace` depends on this being correct.
-
-## 0.8.9
-
-### Stats zeroing on hot-reload — fixed
-
-**Root cause:** `loadMcpModules()` hot-reloads `mcp-registration.js` on every new MCP session (each time Claude Desktop reconnects). The new module instance calls `loadLifetimeStats()` which reads from disk. But the 5-second flush interval from the *old* instance hadn't fired yet, so any stats accumulated since the last flush were in memory only — lost the moment the new instance loaded fresh from disk.
-
-**Fix:** `loadMcpModules()` now calls `mcpDeactivate()` before the `import()` call. `mcpDeactivate` is the `deactivate()` export from `mcp-registration.js` — it does `syncToLifetime()` + synchronous `writeFileSync` to disk. This guarantees the old instance's in-session counts are persisted before the new instance reads from disk. `mcpDeactivate` is `null` on the very first load (no previous instance), guarded accordingly.
-
-## 0.8.8
-
-### `run-command` — chat panel output fix + `showOutput` control
-
-**Bug fixed:** `chatPanelRef` was `null` after a Pulsar workspace restore. The panel opener only fires when `atom.workspace.open()` creates a new instance — on warm boot Pulsar restores the panel silently without calling the opener, so `chatPanelRef` stayed `null` and all streaming was swallowed. Fix: after the `open()` call in `activate()`, scan `atom.workspace.getPaneItems()` for an existing `ChatPanel` instance and assign it to `chatPanelRef` if found.
-
-**`showOutput` param added to `run-command`:** Controls whether stdout/stderr streams live to the chat panel (default `true`). Set `showOutput: false` for noisy diagnostic commands (long file listings, verbose build output) where you only want the final result returned to the LLM, not the panel flooded. Spawn errors always show regardless of `showOutput`.
-
-**Stray `console.log` removed** from run-command handler.
-
-## 0.8.7
-
-### `get-repo-map` — `excludeGlob` filter added
-
-Added `excludeGlob` parameter to `get-repo-map`, matching the filtering pattern used by `replace-across-files`, `grep-project`, and other tools. Applied after `glob` to exclude files/folders from the symbol walk — e.g. `excludeGlob: 'test/**'` or `excludeGlob: '**/*.test.js'`. Uses the existing `globToRegex` helper; no new infrastructure needed.
-
-## 0.8.6
-
-### `get-repo-map` — full Aider-equivalent rewrite
-
-Replaced the v0.8.5 regex+ref-count implementation with a full Aider-style repo map:
-
-**Symbol extraction:** Tree-sitter via Pulsar's WASM layer (`editor.getBuffer().getLanguageMode().rootLanguageLayer`) for any file currently open in an editor tab. Falls back to regex for closed files. Tree-sitter captures `@definition.*` + `@name` pairs from the language's `tags.scm` query — gives accurate full signatures including return type and parameters.
-
-**PageRank ranking:** Builds a directed file→file reference graph weighted by `sqrt(ref_count)`. Runs 20-iteration power-iteration PageRank with optional personalisation via `mentionedFiles` parameter (50× boost for mentioned files). Distributes file rank across its symbols proportional to each symbol's reference share.
-
-**TreeContext rendering:** Groups symbols by file, sorted by file PageRank descending. Within each file, sorts by line number. Renders actual source signature lines with `│` prefix and `⋮...` ellipsis between non-consecutive lines — same format as Aider's `grep-ast` TreeContext.
-
-**Token budget:** `maxTokens` parameter (default 1024 ≈ 4096 chars at ~4 chars/token). Binary search on symbols-per-file cap to find the maximum content that fits in budget.
-
-**Parameter changes:** `maxSymbols` → `maxTokens`; `mentionedFiles` array added. `includeLineNumbers` and `minRefs` unchanged.
-
-**Requires full restart + babel cache clear** (inputSchema changed).
-
----
-
-## 0.8.5
-
-### `get-repo-map` — compressed codebase symbol index
-
-New tool in the SEARCH group. Returns a compact plain-text tree of all function symbols across the project, grouped by file, sorted by cross-file reference count. Designed as a first-call orientation tool for unfamiliar codebases — fits the whole project structure in ~1000 tokens.
-
-**Output format:**
-```
-src/hal.c
-  hal_read()               L45   ← 8 refs
-  hal_write()              L78   ← 3 refs
-  hal_init()               L12
+});
 ```
 
-**Parameters:** `glob` (default `**/*.{c,cpp,h,hpp,js,ts,jsx,tsx}`), `maxSymbols` (default 150), `minRefs` (default 0), `includeLineNumbers` (default true).
+**What `registerMcpTool()` does automatically:**
+- Auto-inits `editStats[tool]` and `lifetimeStats[tool]` from `stats` config — no separate declaration
+- Creates consecutive-failure counter if `features.consecutiveFailureCounter`
+- Injects `ctx` into the handler
+- `ctx.fail(reason, msg)` → bumps `fails.reason` + `counter.count++` + appends `smartSuggestion` + returns error object
+- `ctx.commit(meta)` → `counter.count=0` + bumps `hits` + calls `buildEditResponse` + appends style/lint/struct warnings
+- `ctx.dryRunReturn(preview)` → bumps `dryRuns` + returns preview
+- `summarise()` and `buildReport()` become **data-driven** — iterate `Object.keys(editStats)` instead of hand-enumerating
 
-**Algorithm:** walks all project files, extracts function symbols with a C/JS-aware regex, counts cross-file word-boundary references for each symbol, ranks by ref count, truncates to `maxSymbols`, renders as grouped plain-text tree sorted by file ref weight.
+**What stays the same:** `bump()`, `ANCHOR_SCHEMA`, `STRUCTURAL_ANCHOR_SCHEMA`, `buildEditResponse()`, `smartSuggestion()`, `successNudge()`, `bumpStyle()`, `applyStyleCheck()`, `syncToLifetime()`, `flushLifetimeStats()`, all handler logic.
 
-Stats wired into session and lifetime `get-edit-stats` reporting under `get_repo_map`.
+**Migration phases (incremental — introduce alongside existing pattern):**
 
----
+| Phase | Scope | Risk | Notes |
+|---|---|---|---|
+| 0 | Make `summarise()` + `buildReport()` data-driven | Low | No handler changes. Immediate win — `Object.keys(editStats)` replaces hand-enumeration. |
+| 1 | Write `lib/tool-framework.js` + `registerMcpTool()`. Migrate `replace-all` + `replace-document` as PoC. | Low-Med | Two simple tools with no consecutive counter. Verify stats identical before/after. |
+| 2 | Migrate 8 main edit tools (`str_replace`, `insert`, `delete-line-range`, `delete-block`, `replace-function-body`, `replace-block`, `sed`, `apply-patch`). | Med | One tool at a time. Pre-reboot checklist after each. `apply-patch` needs escape hatch for `rescueAvailable` return shape. |
+| 3 | Migrate search/nav tools. Leave Ghidra tools as-is. | Low | Ghidra tools have minimal boilerplate and change rarely. |
+| 4 | Delete old manual stats declarations + module-scope consecutive-failure counters (now auto-generated). | Low | Final cleanup — only after all tools migrated and verified. |
 
-## 0.8.4
+**Escape hatches needed:**
+- `apply-patch` has `rescueAvailable` and `confirm:true` flow — handler needs to return custom shapes; `ctx.commit()` needs a `raw:true` override.
+- `namingcheck`, `check-function-docs`, `insert-function-doc` use local `curStats` inline-init — intentional, keep as-is (not migration targets).
 
-### Chat panel — copy/paste support + streaming fixes
+**Complexity:** Large overall, but each phase is Low-Medium. Phase 0 alone takes ~30 min with no risk. Full migration: 4–6 sessions.
 
-**Missing `appendOutput` / `appendFault` methods**
-`chat-panel.js` was missing both methods called by `mcp-registration.js` — run-command streaming output and tool fault visibility were silently no-ops. Added both methods following the `showError` pattern.
-
-**Multiline chunk display**
-stdout/stderr chunks arriving as multi-line blocks were displayed as one blob. Fixed to split on `\n` and append each line as a separate div so output is always line-per-line regardless of how PowerShell batches output.
-
-**Text selection and copy**
-Chat panel output was not selectable (mouse drag or Ctrl+C). Root cause: Pulsar's `settings-view` class sets `user-select: none` on the panel root. Fixed by adding `user-select: text` and `-webkit-user-select: text` to both `.chat-panel` and `#chat-display` in the LESS file.
-
-**Right-click context menu — output area**
-Right-click showed only Pulsar pane split options. Fixed by registering `atom.contextMenu.add()` scoped to `.chat-panel #chat-display` with Copy and Select All items, backed by `atom.commands.add()` using `execCommand('copy')` and `window.getSelection()`.
-
-**Right-click context menu + paste — input textarea**
-Paste (Ctrl+V and right-click) was not working in the chat input box. Added `user-select: text` and `-webkit-user-select: text` to `#chat-input` in LESS, and extended the context menu to cover `.chat-panel #chat-input` with Cut, Copy, Paste, and Select All items.
-
-**Misc cleanup**
-Removed dead `static mcpClient`/`static llmModel` fields (caused ESLint parse error), removed `console.log` from `setMcpClient()`, re-applied `setModel: _setModel` unused-var rename.
-
----
-
-## 0.8.3
-
-### `chat-functions.js` bug fixes + dead import removal
-
-**`clearContextHistory` bug**
-
-`clearContextHistory()` was zeroing the array with `length = 0`, wiping the system prompt alongside the conversation history. Fixed to reset to `[{role: "system", content: systemPrompt}]` so the system prompt is always preserved. Also clears the `mcpTools` cache so the tool list re-fetches cleanly on the next LLM call.
-
-**`max_tokens` hardcoded at 1000**
-
-`callLLM()` had `max_tokens: 1000` hardcoded — too low for most coding responses. Now reads `atom.config.get('pulsar-edit-mcp-server.maxTokens') || 4096`. Added `maxTokens` to `package.json` configSchema (integer, default 4096, min 256) so it is user-configurable from Settings.
-
-**Tool call visibility in chat panel**
-
-Each MCP tool call now shows `🔧 \`tool-name\`` in the chat panel before the call is dispatched. Uses the existing `updateChatHistory()` method — no new UI code needed.
-
-**Dead `style-checker` import removed**
-
-`mcp-registration.js` had a stale `import { checkLines as styleCheckLines, formatViolations as styleFormatViolations, isKernelFile } from './style-checker'` at line 7. The file `style-checker.js` does not exist at that path, causing `ERR_MODULE_NOT_FOUND` on load and silently preventing all tools from registering (only ghidra-tools.js, loaded separately, was working). None of the three imported symbols were used anywhere in the file. Import removed.
+**This supersedes the old "Split mcp-registration.js" item** — splitting into per-tool files was the previous answer to the same problem. The framework approach is better: tools stay co-located (easier to cross-reference), the common infrastructure is shared, and the result is more maintainable than N separate files each re-importing the same helpers.
 
 ---
 
-## 0.8.2
+### 🖼️ MEDIUM-HIGH — Visual diff decorations (Cursor-parity)
 
-### `restartServer` hang fix + ghidra-tools console.log cleanup
+Render proposed changes as inline editor decorations — green/red lines in the Pulsar gutter. Claude proposes, user visually reviews in-editor, then accepts or rejects.
 
-**`restartServer` hang (root cause of "only ghidra tools loading")**
+- New tool `stage-edit` or `dryRun:true` returns a staged state
+- Use `editor.decorateMarker()` with custom CSS classes
+- Store staged state in module-level `stagedEdit` object (similar to `patchRescueStore`)
+- `commit-staged` / `discard-staged` or reuse `confirm:true` pattern from apply-patch
+- `highlight-range` decoration system already exists — build on that
 
-`restartServer()` was deadlocking on `await new Promise(resolve => this.serverInstance.close(resolve))` — the built-in MCP client keeps a persistent keep-alive connection open, so `server.close()` never resolves. This meant `startMcpClient()` never ran, no new MCP session was initialized, and `loadMcpModules()` never fired. The ghidra tool `console.log` calls fire at module parse time (not registration time), so they appeared in the console even when registration never happened — making it look like only ghidra tools were loading when in fact nothing was registering.
-
-Fix: close all active transports first, then use `Promise.race(server.close(), 500ms timeout)` + `server.closeAllConnections?.()` so `restartServer()` never hangs regardless of open connections.
-
-**ghidra-tools.js console.log cleanup**
-
-Removed 6x `console.log("Registering Tool: " + curTool)` lines — same noise removed from `mcp-registration.js` in 0.7.x. `replace-all` confirmed 6 matches, committed in one operation.
+**Complexity:** Medium-high.
 
 ---
 
-## 0.8.1
+### 🖼️ MEDIUM — Inline diff in chat panel
 
-### Chat panel — tool fault visibility, destructive command confirmation, drag-and-drop, show panel command
+Show before/after diff rendered directly in the chat display after each edit — no new tab, no editor clutter.
 
-**Tool fault visibility**
+**How other tools do it (researched 2026-06-04):**
+- **Cursor** — renders green/red line decorations inline *in the editor file itself* before accept/reject. Requires deep VS Code fork access to the rendering layer. Not replicable in a Pulsar extension without the visual diff decorations feature below.
+- **Cline** — opens a native VS Code side-by-side diff tab per edit. Works but creates tab noise — the exact thing we want to avoid.
+- **Claude Code (VS Code ext)** — inconsistent: small edits show a diff block inline in the *chat panel*; full file writes open a side-by-side editor tab. Users are complaining about the inconsistency. The `+12 -1` stats indicator in Claude Desktop is a lighter alternative.
+- **Aider** — terminal only. Diffs are opt-in via `/diff` command or `--show-diffs` flag. Retroactive, not pushed.
 
-Every MCP tool error now appears in the chat panel as a red `⚠ tool-name: message` block, so failures are visible to the developer in real time rather than silently disappearing into the LLM context.
+**Proposed approach** — inline diff block in the chat display after each edit, matching what Claude Code does for small edits (the better half of their inconsistent UX):
+- `diff` library already imported
+- Collapsible block with `+N -N` summary line (matches Claude Desktop stats indicator) — click to expand full unified diff
+- Always visible summary, detail on demand — avoids noise for large edits
+- `chat-functions.js` + `chat-panel.js` only, no new tools needed
 
-- `mcp-registration.js`: thin `wrapHandler` closure patched onto `server.registerTool` at the top of `mcpRegistration()`. All tool handler throws are intercepted, `chatPanel.appendFault(name, err.message)` is called, then the error is re-thrown so the MCP SDK still returns an error response to the LLM. Zero changes to individual tool handlers.
-- `chat-panel.js`: `appendFault(toolName, message)` method added — dark red box with amber left border, same append/autoscroll pattern as `appendOutput`.
-
-**Destructive command confirmation**
-
-`run-command` now pauses and shows a **Run / Cancel** widget in the chat panel before executing any command matching a destructive pattern (`rm`, `rmdir`, `del`, `rd`, `format`, `Remove-Item`, `ri`, `rd /s`). The MCP response is held in a Promise until the user clicks.
-
-- `confirm: boolean` parameter added to `run-command` inputSchema — pass `confirm:true` to bypass the UI for LLM-driven automation flows.
-- If the chat panel is not open, destructive commands are blocked outright and return a JSON error rather than running silently.
-- `styles/pulsar-edit-mcp-server.less`: `.chat-command-confirm` class (amber left border, dark amber background) + `.chat-command-fault` (dark red).
-
-**Drag-and-drop path inserter**
-
-Drop a file from the filesystem onto the chat textarea → the file's path is inserted at the cursor position. File contents are never read — the LLM uses `read-file` or `grep-file` as needed, keeping the context window lean.
-
-- `chat-panel.js`: `dragover` + `drop` listeners on the textarea. Uses `event.dataTransfer.files[n].path` and inserts at `selectionStart`.
-
-**Show Chat Panel command**
-
-Reopens the chat panel at any time without restarting Pulsar. Previously the only way to get it back was to restart with the `showChatPanel` setting enabled.
-
-- `pulsar-edit-mcp-server.js`: `pulsar-edit-mcp-server:show-chat-panel` command calls `atom.workspace.open('atom://pulsar-edit-mcp-server/chat')`. Pulsar's opener deduplicates — returns the existing panel if alive, creates a new one if closed.
-- `menus/pulsar-edit-mcp-server.json`: **Packages → MCP Server → Show Chat Panel** and right-click context menu entry added.
+**Complexity:** Medium.
 
 ---
 
-## 0.8.0
+### 🧪 MEDIUM — Automated testing and script runner
 
-### `run-command` — live output streaming to chat panel
+**Status:** Design complete. Not yet started. Three tiers — do Tier 1 first, others depend on it.
 
-`run-command` now streams stdout and stderr to the built-in chat panel in real time as the process runs, rather than buffering all output until the process exits.
+#### Tier 1 — Script runner: drive the existing HTTP endpoint from a JSON script file
 
-- `chat-panel.js`: added `appendOutput(text, type)` method. Creates a `div` with CSS classes `chat-command-output` + `chat-command-{type}` (types: `stdout`, `stderr`, `info`, `exit`), appends to `#chat-display`, and autoscrolls. The command line itself is shown as an `info` entry (`$ command`) before execution starts.
-- `mcp-registration.js`: `spawn` added to `child_process` imports. `mcpRegistration()` gains a fifth parameter `chatPanel = null`. The `run-command` handler replaces the previous `exec`-based implementation with `child_process.spawn` — `stdout` and `stderr` data events stream chunks to `chatPanel.appendOutput()` live and accumulate into full buffers. Process close resolves the MCP response with the same shape as before (stdout, stderr, exitCode). Timeout handled via `setTimeout` + `proc.kill()`. A `run_command` entry (`hits`, `fails.spawnError`) is added to `editStats`.
-- `pulsar-edit-mcp-server.js`: `chatPanelRef` module-level variable added (same pattern as `linterRegistry`) and set alongside `this.chatPanel = new ChatPanel()`. The `autoStart` block now checks `atom.packages.hasActivatedInitialPackages()` first so warm-boot timing is handled correctly — if initial packages have already activated, `restartServer()` is called immediately rather than registering a callback that will never fire.
+The MCP HTTP server is already running at `localhost:PORT`. A script runner is just a Node.js CLI that reads a `.json` script file and POSTs each step to the existing server — no new server, no new protocol.
 
-All `chatPanel` calls in the handler are guarded with `if (chatPanel)` — safe when the panel is not open.
+**Script format (`scripts/verify-tools.json`):**
+```json
+{
+  "name": "post-edit verification",
+  "steps": [
+    {
+      "tool": "run-command",
+      "args": { "command": "node --check lib\\mcp-registration.js" },
+      "assert": { "exitCode": 0 }
+    },
+    {
+      "tool": "get-diagnostics",
+      "args": { "scope": "project" },
+      "assert": { "messageCount": 0 }
+    },
+    {
+      "tool": "str_replace",
+      "args": {
+        "old_str": "const TEST_ANCHOR = 'hello';",
+        "new_str": "const TEST_ANCHOR = 'hello';",
+        "dryRun": true
+      },
+      "assert": { "matched": true }
+    }
+  ]
+}
+```
 
-**Boot fix:** `await atom.workspace.open()` in `activate()` delayed execution past `onDidActivateInitialPackages`, so `restartServer()` was never called on a warm boot. Fixed by checking `hasActivatedInitialPackages()` first. `getUserValue` (not a real Pulsar API) replaced with `getSchema(key).default` comparison.
+**Runner (`scripts/run-script.js`):**
+```js
+// node scripts/run-script.js scripts/verify-tools.json
+// POSTs each step to localhost:PORT/mcp/v1/tools/call
+// Reports pass/fail per step, exits non-zero if any assert fails
+```
 
----
+**Invocation from chat panel or run-command:**
+```
+run-command: node scripts/run-script.js scripts/verify-tools.json
+```
 
-## 0.7.9
+**Key design points:**
+- No new server, no new protocol — uses the HTTP endpoint the MCP SDK already exposes
+- Script files are version-controlled alongside the package — they accumulate over time as a regression suite
+- `assert` block is optional — steps without asserts still run and report output (useful for smoke tests)
+- Supported assert keys: `exitCode`, `messageCount`, `matched`, `applied`, `hits`, `contains` (substring in response text), `not_contains`
+- On failure: print the actual response + diff vs expected, exit 1
 
-### Stats pause/resume — UI toggle
+**Files needed:** `scripts/run-script.js` (~80 lines), script `.json` files in `scripts/`
 
-Added a **⏸ Pause Stats / ▶ Resume Stats** toggle to the Edit Stats panel. When paused, `bump()` is a no-op so tool hits and fails are not recorded — useful when working on Ghidra pseudocode or other non-standard files where failures would skew hit-rate stats.
-
-- `mcp-registration.js`: `let statsPaused = false` module-level flag; `bump()` returns early when set; `getEditStats()` response includes `paused: true/false`; `toggleStatsPause()` exported for the UI.
-- `pulsar-edit-mcp-server.js`: Stats panel gets a yellow **⏸ STATS PAUSED** banner and a Pause/Resume button that updates reactively without reopening the panel. No new MCP tools — UI-only.
-
-### Lint cleanup
-
-Resolved all ESLint warnings and errors across the open file set:
-
-- **`mcp-registration.js`**: `5_000` numeric separator → `5000` (parse error — ESLint ecmaVersion does not support ES2021 numeric separators). Nine unused variables prefixed `_`: `ANCHOR_DESC`, `failureSuggestion`, `searchTo`, `flag` (destructure rename), `pattern` (regex validate-only block in replace-across-files), `hintLabel`, `fnRe`, `diffHunks`, `lineNo`.
-- **`pulsar-edit-mcp-server.js`**: Removed unused `import { z } from "zod"`. Added missing `import * as Diff from "diff"` (used in `saveBaseline()` but was never imported). Removed dead `isServerSourceFile()` function — defined but never called.
-- **`style-checker.js`**: `lastNonEmpty` → `_lastNonEmpty` (computed but never read).
-- **`chat-panel.js`**: Removed `static mcpClient = null` and `static llmModel = null` class field declarations — ES2022 syntax unsupported by the ESLint config, and both were dead (`mcpClient` is an instance property set via `setMcpClient()`, `llmModel` was never read anywhere). Renamed unused `setModel` destructure import to `setModel: _setModel`.
-
----
-
-## 0.7.8
-
-### Bug fixes — code cleanup
-
-- **`pulsar-edit-mcp-server.js`**: Removed dead `import { randomUUID } from "crypto"` (unused — `createUUID()` uses a manual implementation). Moved misplaced `import path`, `import fs`, and `import ChatPanel` from after `loadMcpModules()` back into the static imports block at the top of the file. Removed duplicate `this.subscriptions.dispose()` call in `deactivate()` — the guard block at lines 311–313 was a redundant second dispose after the unconditional call at line 304.
-
-- **`mcp-registration.js`**: Removed stray `console.log(entry)` left in the `dbg()` helper. Removed stray `console.log('[style-check] _totalCHEdits=...')` from the inline style-check path. Removed 58 `console.log("Registering Tool: ...")` calls that fired on every MCP server reload. Converted `const { ... } = require('./style-checker')` to a proper ESM `import` — the only `require()` in a file that otherwise uses `import` throughout.
-
----
-
-## 0.7.7
-
-### `style-checker.js` — `singleline_if` rule added
-
-Added `singleline_if` (CHECK severity) to detect control-flow bodies on the same line as their keyword — e.g. `if (!g_hal) return -1;`. Linux kernel style requires the body on its own line even for single-statement guards. The rule fires on `if`, `else`, `for`, and `while` and is detected without a full parser by matching lines where the token after the closing `)` is not `{` or a comment.
-
-The rule is tracked in `styleStats` / `lifetimeStyleStats` alongside all other per-rule counters. The reset loop is self-maintaining (`Object.keys`) so no reset block changes were needed.
-
-### `test/hal.c` — rewritten to correct Linux kernel style
-
-The test file was originally written with two kernel style violations:
-
-- **Doxygen-style file header** (`@file` / `@brief`) — kernel code uses plain `/* */` block comments, not Doxygen.
-- **Single-line `if` bodies** — all guard returns were written as `if (!g_hal || ...) return -1;` on one line. Kernel style requires the body on the next line.
-
-Both corrected. `checkpatch` confirms zero violations.
+**Complexity:** Low. The HTTP endpoint is already there; this is a thin client.
 
 ---
 
-## 0.7.6
+#### Tier 2 — In-process test harness: call tool handlers directly, assert on output
 
-### `checkpatch` — standalone style audit tool for C/C++ files
+For unit-testing individual tool handlers without the HTTP overhead and without Pulsar running. Useful for CI, for testing edge cases that are hard to reproduce live, and for the tool framework migration (verify each migrated tool produces identical output).
 
-A new `checkpatch` tool has been added to the **debugging** group. It runs the kernel-style whitespace and formatting checker (`style-checker.js`) against an entire file and returns violations grouped by rule, sorted by frequency.
+**How:** Export a `callTool(name, args)` function from `mcp-registration.js` that bypasses HTTP and calls the registered handler directly with a mock `editor`/`buffer` context.
 
-**Behaviour:**
-- Pass `filePath` to audit any project file, or omit to audit the active editor buffer (live — no save required for open files).
-- Non-.c/.h files return a clean "skipping" message — the guard prevents noise on JS/JSON/Markdown files.
-- Results grouped by rule (e.g. `wrong indentation - spaces vs tabs`) with line numbers shown per rule and a `...and N more` cap at 20 per rule.
-- Returns a clean confirmation message when no violations are found.
+```js
+// spec/tool-harness.js
+const { callTool, mockEditor } = require('../lib/mcp-registration');
 
-**Why this matters for LLM-generated edits:**
-When an LLM edits a C file, it may introduce whitespace inconsistencies — mixing tabs and spaces, incorrect indentation depth, trailing whitespace. These don't affect semantics but break kernel coding style and cause `checkpatch.pl` failures in kernel workflows. More importantly, they make the file **non-uniform**, which degrades the effectiveness of `fuzzyWhitespace`-based matching on subsequent edits — a uniform file is predictable and anchors cleanly; a mixed file creates ambiguous matches.
+const editor = mockEditor({
+  text: 'const x = 1;\nconst y = 2;\n',
+  filePath: 'test/fake.js'
+});
 
-`checkpatch` gives the LLM (and the developer) a single-call audit of the entire file's style state, separate from per-edit inline checking. This complements the inline per-edit style tracking in `get-edit-stats` (which measures violations introduced per edit) by providing a full-file baseline view.
+const result = await callTool('str_replace', {
+  old_str: 'const x = 1;',
+  new_str: 'const x = 99;',
+}, editor);
 
-**Stats integration:** `checkpatch` runs are tracked in `styleStats` alongside inline edit checks. `get-edit-stats` now returns `checkpatchRuns` and `checkpatchViolations` in the `styleChecks` section, and the `sessionStyleSummary` string includes both inline and checkpatch totals.
+assert(result.matched === true);
+assert(editor.getText().includes('const x = 99;'));
+```
 
-### `style-checker.js` — major rewrite aligned to Linux kernel coding standard
+**Key design points:**
+- `mockEditor(options)` returns a minimal object implementing the Pulsar `TextEditor` API surface the tools use (`getText`, `getLines`, `setTextInRange`, `getPath`, etc.) — pure JS, no Pulsar needed
+- Test files live in `spec/` alongside existing spec files
+- Run with `node --test spec/tool-harness.js` (Node 18+ built-in test runner) or plain `node spec/tool-harness.js`
+- The tool framework (item 1 in TODO) makes this much easier — once handlers receive `ctx` injection, `mockEditor` is just a mock `ctx`
+- Doubles as the regression suite for the tool framework migration: run before and after each tool migration, assert outputs match
 
-Complete rewrite of `style-checker.js` to properly implement Linux kernel coding style
-rules as defined in `Documentation/process/coding-style.rst` and enforced by
-`checkpatch.pl`. The checker is advisory — it reports violations for the LLM to decide
-on, never auto-corrects.
+**Files needed:** `spec/tool-harness.js`, `lib/mock-editor.js` (~100 lines)
 
-**Key design changes:**
+**Complexity:** Medium. `mockEditor` needs to cover the Pulsar buffer API surface used by tools — about 15 methods. The tool framework makes this significantly easier.
 
-- **Severity levels** added to every violation: `ERROR` (must fix), `WARNING` (should fix),
-  `CHECK` (informational). Matches checkpatch.pl's three-tier system. `formatViolations()`
-  now groups output by severity.
-
-- **`sanitiseLine()` helper** — replaces string literal contents, char literals, `/* */`
-  block comment bodies, and `//` line comment tails with placeholder characters before
-  running spacing checks. Eliminates false positives on content inside strings/comments.
-  Block comment state tracked across lines via `inBlockComment`.
-
-- **`wrong_indentation` fixed** — previous version fired on any leading spaces including
-  hal.c's consistent 4-space style. Now correctly implements the kernel rule: leading
-  spaces on a code line are an ERROR. Skips block comment interiors, `*` continuation
-  lines, and `#` preprocessor lines.
-
-- **`single_line_comment` downgraded** to `CHECK` — checkpatch.pl now sets
-  `$allow_c99_comments = 1` by default, meaning `//` comments are tolerated.
-  Previously reported as a full violation.
-
-- **New rules added:**
-  - `dos_line_endings` (ERROR, whole-file) — `\r\n` line endings
-  - `trailing_blank_lines` (ERROR, whole-file) — blank lines at end of file
-  - `open_brace_control` (WARNING) — replaces old `brace_placement`; `{` on own line
-    after control flow keyword should be on same line (K&R)
-  - `open_brace_function` (WARNING) — function `{` on same line as signature should be
-    on its own line (Allman for functions)
-  - `else_brace_placement` (WARNING) — `else` on separate line from `}` should be
-    `} else {`
-  - `space_before_open_brace` (WARNING) — `if(x){` missing space before `{`
-
-- **`brace_placement` kept** in stats shape for backwards compatibility with existing
-  lifetime data on disk.
-
-- **Reset loop** for style stats is now self-maintaining — iterates `Object.keys(styleStats)`
-  instead of a hardcoded list, so adding new rules never requires updating the reset block.
-
-**Rules deliberately omitted** (too ambiguous, kernel-specific, or require a parser):
-typedef/struct naming, Signed-off-by signoffs, deprecated kernel APIs, spelling,
-`#include` ordering, `do {} while (0)` macro wrapping, braces-required-for-multi-line-if,
-complex operator spacing beyond plain `=`.
-
-
-
-`checkLines` in `style-checker.js` was firing `missing_newline_eof` on every inline edit
-check because `new_str` snippets virtually never end with `\n` — they're code fragments, not
-complete files. This rule was polluting every edit's style report and inflating the lifetime
-`missing_newline_eof` violation count (confirmed: fired on all 5 lifetime inline checks).
-
-**Fix:** Added `isWholeFile = false` parameter to `checkLines`. The EOF check is now gated
-on `isWholeFile`. The `checkpatch` tool passes `true` (it audits a complete file). All edit
-tools call through `applyStyleCheck` which passes nothing (defaults to `false`). No change
-needed at the `applyStyleCheck` call sites — the default handles it transparently.
-
-### `replace-all` — inline style check wired
-
-`replace-all` now runs `applyStyleCheck(replacement, filePath)` after committing changes,
-matching the behaviour of all other edit tools. Previously a `replace-all` across a `.c`/`.h`
-file gave no style feedback regardless of what the replacement text contained. The `🎨 style`
-suffix now appears on the success response if the replacement introduces violations, and the
-results are accumulated in `get-edit-stats` `styleChecks` counters.
-
-### `list-project-functions` / `list-functions` / `get-function-list-with-comments` — keyword false positives fixed
-
-All three function-listing tools shared a `fnRe` regex that matched any line of the form
-`identifier(` — including C control-flow keywords `if (`, `for (`, `while (`, `switch (`.
-This caused spurious entries like `{ name: "if", signature: "if (!g_hal || ...) {" }` in
-results. Fixed by adding a negative lookahead `(?!if|for|while|switch|return|else|do\b)`
-immediately before the capture group in all three regex instances (lines 1113, 3523, 3651).
-
-### Bug fix — `apply-patch` fuzzy rescue `allLines is not defined` crash
-
-The fuzzy rescue failure paths in `apply-patch` (both the "could not parse hunks" early
-exit and the "fuzzy rescue failed" final failure) called `smartSuggestion()` with
-`fileLines: allLines.length`. `allLines` is declared in the `sed` handler's scope and
-is not available in the `apply-patch` handler, which uses `bufLines` for the same data.
-This caused a runtime ReferenceError on any patch that triggered the fuzzy rescue path,
-swallowing the proper failure message and returning a raw JS exception string instead.
-
-**Fix:** Both `allLines.length` references at lines 4713 and 4812 replaced with
-`bufLines.length`. Discovered during full tool sweep in 0.7.6 testing session.
-
-
-
-The `const isCodeFile` declaration was placed at line ~1386 (inside the match-found path) but was referenced at line ~1374 in the `smartSuggestion` call on the no-match/failure path. JavaScript `const` temporal dead zone (TDZ) caused a runtime crash "Cannot access 'isCodeFile' before initialization" that silently swallowed the ambiguity guard — the guard fired but the error handler crashed before returning the AMBIGUOUS MATCH response.
-
-**Fix:** `const isCodeFile` hoisted to immediately after `const buffer = editor.getBuffer()` (~line 1100), before all failure paths. Duplicate declaration at the old location removed via `sed`.
-
-**Why TDZ bugs are dangerous in MCP servers:** The crash occurred inside the tool call handler — the MCP SDK's wrapper caught it and returned a minimal failure object rather than propagating it. The tool appeared to "work" (it returned a response) but the ambiguity guard had never fired. This class of bug — silent crash inside a hot path — can only be found by noticing missing behaviour, not by reading error logs.
-
-### Bug fix — fuzzy rescue preview hunk regex (`$` in multiline mode)
-
-The `apply-patch` fuzzy rescue preview was always showing empty `+`/`-` lines. Root cause: the hunk body capture regex used `$` as an end-of-input anchor, but with the `/gm` flags, `$` matches end-of-line. The capture group `([\s\S]*?)` stopped at the first newline, so the entire hunk body beyond line 1 was never captured.
-
-**Fix:** Replaced `$` with `(?![\s\S])` — a negative lookahead that only matches true end-of-input, equivalent to `\z`. The `/gm` flags are kept; only the terminator anchor changed.
-
-Also fixed the interleaving of `+` lines in the preview — they now appear immediately after their corresponding `-` lines rather than appended at the bottom of the context window.
-
-### Stats panel fixes — `showEditStats()` in `pulsar-edit-mcp-server.js`
-
-Three display bugs fixed in the edit stats UI panel:
-- **"undefined" in summary**: the tools list was built from `Object.keys(s)` which included non-tool keys (`sessionEditSummary`, `styleChecks` etc.). Fixed: filter to only keys where `s[key].hits` is a number.
-- **Content cut off**: `JSON.stringify` on `fails`/`hintsUsed` produced long lines. Fixed: expand only non-zero entries inline, suppress zero fields entirely.
-- **`replace_document` badge**: showed "X hits / 0 fails" incorrectly. Fixed: `negCount` is null for hits-only tools; badge text omits fail count.
-
-Panel `min-width` also increased 680 → 760px.
+**Dependency:** Benefits greatly from Tool Framework Phase 1 being done first (handlers become testable in isolation). Can be started independently but is much cleaner after the framework exists.
 
 ---
 
-## 0.7.5
+#### Tier 3 — Named procedures: reusable tool sequences with conditional logic
 
+A named, version-controlled procedure system — sequences of tool calls with variable substitution, conditionals, and loops. Invokable by name from the chat panel or from Tier 1 scripts.
 
-### Tool descriptions rewritten — decision triggers and decision ladders
+**Procedure format (`procedures/post-edit-verify.proc.json`):**
+```json
+{
+  "name": "post-edit-verify",
+  "description": "Run after any mcp-registration.js edit",
+  "vars": { "file": "lib/mcp-registration.js" },
+  "steps": [
+    { "tool": "run-command",    "args": { "command": "node --check {{file}}" }, "assert": { "exitCode": 0 }, "on_fail": "abort" },
+    { "tool": "get-diagnostics","args": { "scope": "project" },                 "assert": { "messageCount": 0 } },
+    { "tool": "get-edit-stats", "args": {} }
+  ]
+}
+```
 
-All `registerTool` descriptions and `TOOL_CATALOGUE` short descriptions have been rewritten. The previous descriptions listed features; the new ones lead with **decision triggers** and **decision ladders** that tell the LLM *when to reach for each hint*, not just what it does.
+**Invocation from chat:**
+```
+@// post-edit-verify
+```
+(via the existing `@//` shortcuts system — procedures are just a richer kind of shortcut)
 
-**Philosophy change:** An LLM reading `"supports functionHint"` has no trigger to fire on. An LLM reading `"Know the function name? → functionHint:'myFn' — scopes search to inside that function body, safest choice for JS/C"` has a concrete decision rule.
+**Difference from Tier 1:** Tier 1 is a static sequence. Tier 3 adds: variable substitution (`{{file}}`), `on_fail: abort | continue | retry`, conditional steps (`"if": "{{exitCode}} == 0"`), and named procedures invokable from chat shortcuts — closing the gap with Windsurf Cascade workflows.
 
-**Tools rewritten (registerTool descriptions):**
-- `str_replace` — decision ladder: (1) functionHint (2) afterHint (3) betweenHint (4) lineNumberHint (5) occurrence. Each step lists when to use it, not just what it does
-- `insert` — decision ladder: (1) functionEnd (2) afterContent/beforeContent (3) with functionHint (4) occurrence (5) insert_line as last resort
-- `find-text` — rewritten around use cases: "use before str_replace to count occurrences", "matchCount > 1 means use a hint"
-- `delete-line-range` — decision ladder: (1) functionHint (2) betweenHint (3) afterHint (4) startLine+endLine
-- `delete-block` — decision ladder: (1) sectionHint (2) preprocBlock (3) startContent+endContent
-- `replace-block` — concrete example added, braceMatchFailed fallback explained
-- `get-region` — rewritten as "verify before editing" tool with follow-up workflow
-- `replace-across-files` — two-step workflow (Step 1 / Step 2) made explicit
-- `replace-function-body` — workflow guidance: "use read-lines with functionHint first, then call replace-function-body"
-- `grep-file` — "PRIMARY USE: locate content to get line numbers before editing"; occurrence:N linked to str_replace lineNumberHint
-- `grep-project` — "PRIMARY USE: find where a symbol is when you don't know the file"
-- `read-lines` — decision ladder for all 5 modes, return values linked to downstream tools
-- `get-structural-anchors` — TYPICAL WORKFLOW section added
-- `apply-patch` — use-case trigger moved to front: "USE THIS for edits touching multiple scattered locations"
-- `search-symbol` — "USE THIS INSTEAD OF grep-project for symbol names — word boundary matching"
+**Complexity:** Medium. The runner from Tier 1 is the engine; Tier 3 adds a template/conditional layer on top.
 
-**TOOL_CATALOGUE short descriptions** also rewritten for: `str_replace`, `find-text`, `insert`, `delete-line-range`, `delete-block`, `replace-block`, `get-region`, `replace-all`, `get-structural-anchors`, `read-file`, `read-lines`, `replace-across-files`, `replace-function-body`, `grep-file`, `grep-project`, `search-symbol`.
-
-Requires full restart + babel cache clear to expose updated descriptions to Claude Desktop.
-
-### `readFileOrBuffer` — exists check added
-
-Added `if (!fs.existsSync(filePath)) throw new Error('File not found: "..."')` inside `readFileOrBuffer()`, covering all 12 call sites globally. Previously, a missing path caused `fs.promises.readFile` to throw inside the MCP SDK's tool call wrapper, which caught it and returned an empty/minimal result object rather than propagating the error — causing `get-file-summary`, `read-lines`, `grep-file`, and others to silently return wrong data for bad paths. Also fixed `get-structural-anchors` which was calling `fs.promises.readFile` directly instead of `readFileOrBuffer`.
-
-Hot-reload safe — no schema changes.
+**Dependency:** Build on Tier 1. The `@//` shortcuts system already exists as the invocation mechanism.
 
 ---
 
-## 0.7.4
+**Relationship to other TODO items:**
 
-### `replace-across-files` — confirm pattern, contextLines, maxMatches, per-match line numbers
+- **Tool Framework** — Tier 2 (in-process harness) pairs directly with the framework migration: run the harness before/after each tool migration as a correctness gate.
+- **Failure capture** — script runner (Tier 1) can run known-failure scenarios and assert the NDJSON log records the right `reason` and `diffVsBuffer`.
+- **Per-step approval (Feature Gap table)** — Tier 3 procedures are a natural place to hook in per-step approval UI: show each step's intent in the chat panel before executing.
 
-The tool previously fired blind: `dryRun:true` showed file names and counts but no line numbers, and the commit was a separate `dryRun:false` call with no link to the preview. A bad query could silently corrupt dozens of files.
-
-**New safe workflow:**
-
-1. Call without `confirm` — returns a full match listing: every match with its line number and `contextLines` lines of surrounding context (default 2, same shape as `grep-file` results). Results are stored in a pending store keyed on the query parameters.
-2. Review the listing, then call again with `confirm:true` — commits using the stored pending result without re-scanning.
-
-**`maxMatches` cap (default 50):** if total matches across all files exceed the cap the tool blocks entirely and asks you to narrow with `glob` or raise the cap. Prevents accidentally replacing hundreds of occurrences of a common token.
-
-**`dryRun:true` kept** as a legacy alias for the preview pass — existing calls still work.
-
-New params: `contextLines` (number, default 2), `maxMatches` (number, default 50), `confirm` (boolean).
+**Priority within this item:** Tier 1 first (standalone, no dependencies, immediately useful). Tier 2 after Tool Framework Phase 1. Tier 3 after Tier 1 is working.
 
 ---
 
-### `read-lines` and `get-region` — hintsUsed bump() calls
+### 💾 LOW — Disk-backed checkpoints
 
-Both tools had `hintsUsed` fields in the stats initializer and `getEditStats()` return blocks, but the handlers never incremented them — hint usage was silently dropped from stats.
+**Status:** Not started.
 
-- `read-lines`: now bumps `hintsUsed.functionHint`, `hintsUsed.afterHint`, `hintsUsed.betweenHint`, or `hintsUsed.lineNumberHint` (centerLine maps to the lineNumberHint bucket) on each successful call where a hint was used.
-- `get-region`: now bumps `hintsUsed.occurrence` when `occurrence > 1` is passed.
+**Problem:** In-memory checkpoints are wiped on every `mcp-registration.js` save (Pulsar hot-reload). Any multi-step edit sequence that spans a server reload loses its safety net. The gap table notes Cline uses a shadow git repo for this.
 
-Hot-reload safe — handler body changes only.
+**Proposed:** `checkpoint-to-disk name` / `restore-from-disk name` tool pair. Snapshot = file path + full text written to `.mcp-checkpoints/<name>-<timestamp>.json`. No git required. Survives reloads. The existing `checkpoint` / `restore-checkpoint` tools stay as fast in-memory fallbacks.
 
----
-
-## 0.7.3
-
-### Edit vs search stats split — misses are not failures
-
-`grep-file`, `grep-project`, `search-symbol`, and `find-text` are read-only location tools. A no-result response is a **miss**, not a failure — it means the search term wasn't found, which is often expected. Counting them alongside `str_replace` failures in the session success rate was misleading (a session with many exploratory greps would appear to have a low hit rate even if every edit succeeded).
-
-**What changed:**
-
-- `summarise()` now computes two independent totals: `editHits`/`editFails` (buffer-modifying tools only) and `searchHits`/`searchMisses` (location tools only). The session/lifetime summary strings are separate: `sessionEditSummary` and `sessionSearchSummary` (and lifetime equivalents).
-- `get-edit-stats` response now returns `sessionEditSummary` + `sessionSearchSummary` instead of a single `sessionSummary`. Likewise for `lifetimeEditSummary` + `lifetimeSearchSummary`.
-- Search tools (`grep_file`, `grep_project`, `search_symbol`, `find_text`) now report `missTotal` and `misses` instead of `failTotal` and `fails` in the response — the field name signals the different semantic.
-- Pulsar UI panel: summary line now shows both summaries (`"12 edit ops: 11 hits (92%), 1 fails  |  18 searches: 14 hits, 4 misses"`). Search tool badges show a blue background instead of red/amber — visually distinguishing misses from failures. Detail rows show `misses:` label instead of `fails:` for search tools.
-
-**Edit tools** (failures counted in edit rate): `str_replace`, `insert`, `delete-line-range`, `delete-block`, `replace-block`, `replace-function-body`, `replace-all`, `replace-document`, `replace-across-files`, `apply-patch`, `sed`.
-
-**Search tools** (misses counted separately): `grep-file`, `grep-project`, `search-symbol`, `find-text`.
+**Implementation:** ~40 lines in a new handler. `fs.writeFileSync` on checkpoint, `fs.readFileSync` + `buffer.setText()` on restore. Store in package dir alongside `edit-stats.json`.
 
 ---
 
-## 0.7.2
+### 🔀 LOW — Git integration tool
 
-### Stats — `fails.ambiguous` added to `str_replace`
+**Status:** Not started. `run-command` can already call git — this is about surfacing it cleanly as a first-class tool.
 
-The ambiguity guard was blocking correctly but bumping the wrong counter: `fails.partialMatch` instead of the dedicated `fails.ambiguous` field. Fixed — ambiguous-match blocks are now counted separately from partial content matches, making the two failure classes distinguishable in `get-edit-stats` output. `ambiguous` is covered by `Object.values(fails)` in `allFails` reduce so no change was needed to the totals calculation.
+**Problem:** After a successful editing session there's no easy way to commit the work with a meaningful message. Manually running `run-command` with a git command works but is clunky and not tracked in edit stats.
 
-### `_isCodeFile` deduplication in `str_replace` handler
+**Proposed:** A `git-commit` tool: takes a `message` param, runs `git add -p` interactively or `git add <files>` + `git commit -m`. Returns the commit hash. Could also expose `git-status` (cleaner than `run-command git status`) and `git-diff` (show pending changes before committing).
 
-`_isCodeFile` was computed three times inside the `str_replace` handler. All three were hoisted to a single `const isCodeFile` declared once after the dry-run block and shared across the ambiguity guard, `smartSuggestion`, and `successNudge` call sites. Cosmetic only — no behaviour change.
-
-### `resetEditStats` — generic `Object.entries` loop replaces hardcoded tool list
-
-`resetEditStats()` previously zeroed each tool's counters via a hardcoded array of tool key names. Replaced with a generic `Object.entries(editStats)` loop that zeros all counters for whatever tools are currently present in the initializer. Any new tool added to `editStats` is automatically included in resets without a separate code change. Applied to both the exported function (used by the Pulsar UI panel) and the inline MCP handler.
-
-### `mergeInto()` rewritten — disk is authoritative on load
-
-The previous `mergeInto(target, src)` iterated `Object.keys(target)` (the in-memory schema) when merging disk data into the live stats object on startup. Keys present on disk but absent from the current schema were silently dropped. Rewritten to iterate `Object.keys(src)` (the disk data) instead: disk values take precedence; schema keys not on disk default to 0. Forward-compatible — adding a new tool to `editStats` produces a zero counter on the first run after upgrade, not a crash or missing key.
-
-### Stats flush interval: 60 s → 5 s
-
-The `setInterval` that flushes lifetime stats to `edit-stats.json` was reduced from 60 seconds to 5 seconds. The interval is a crash safety net only — the primary flush paths are `deactivate()` (synchronous, on clean package reload) and `beforeunload` (synchronous, on window close). Reduced interval means a hard crash loses at most 5 seconds of stats rather than up to a minute.
-
-### `deactivate()` export wired through to Pulsar package lifecycle
-
-`mcp-registration.js` already exported a `deactivate()` function that synchronously flushes lifetime stats to disk. It was never imported or called by `pulsar-edit-mcp-server.js` — Pulsar's package lifecycle calls `deactivate()` on the main package file, not on required modules. Fixed: `loadMcpModules()` now captures `reg.deactivate` into `mcpDeactivate`, and the package-level `deactivate()` calls `mcpDeactivate()` as its first action before teardown. Without this, any session shorter than the flush interval wrote nothing to disk; on the next startup `mergeInto` loaded stale data and the interval timer overwrote it with zeros, silently wiping lifetime history.
+**Implementation:** Thin wrappers around `run-command` internals. Low complexity — the interesting design question is whether to auto-add all modified files or require explicit paths.
 
 ---
 
-## 0.7.1
+### Future / lower priority
 
-### `get-edit-stats` — search and file-ops tools now tracked
-
-`grep-file`, `grep-project`, `search-symbol`, `replace-document`, and `replace-across-files` were previously invisible to `get-edit-stats`. Stats, hit/fail totals, and the Pulsar UI panel now cover all tools.
-
-**What was added:**
-
-- `grep-file`, `grep-project`, `search-symbol` — track `hits`, `fails.noMatch`, and `hintsUsed.occurrence` / `hintsUsed.contextLines`. `noMatch` fires on zero-result queries and on `occurrence N not found` errors, so both failure classes are visible.
-- `replace-document` — tracks `hits` only (no meaningful fail mode; the tool either succeeds or throws).
-- `replace-across-files` — tracks `hits`, `fails.skipped` (files where no match was found), and `dryRuns`.
-- `get_selection` dead `hintsUsed` block removed from the editStats initializer and both return objects — the tool has no hint params and the block was never populated.
-- `buildReport()` (used by the `get-edit-stats` MCP tool), `getEditStats()` (used by the Pulsar UI panel), and both allHits/allFails summarise blocks updated to include all five new tools. Session and lifetime return objects updated.
-- CHANGELOG, README, and LLM-FAILURE-MODES updated to reflect the full tool coverage.
-
-
-
-### `lint: true` — inline linter feedback on edit tool responses
-
-All nine edit tools (`str_replace`, `replace-function-body`, `replace-block`, `insert`, `delete-line-range`, `delete-block`, `apply-patch`, `replace-all`, `sed`) now accept a `lint: true` parameter. When set, the tool response appends a scoped linter snapshot immediately after the edit — no need to call `get-diagnostics` separately.
-
-**Behaviour:**
-- Fires on success only (failure path shows the tool's existing error guidance).
-- Messages filtered to errors + warnings only (info is too noisy).
-- Scope: the rows touched by the edit (insert/replace: inserted row range ±5; delete: rows at the deletion point ±5).
-- `apply-patch`, `replace-all`, and `sed` use whole-file scope — they touch arbitrary locations so no single range is meaningful.
-- Silent when clean — a successful edit with no lint messages produces no extra output.
-- Silent when linter-bundle is not active — safe on all project types.
-
-**Implementation details:**
-- Shared `lintSnapshot(editor, startRow, endRow)` helper added alongside `ambiguityCheck` and `smartSuggestion`.
-- `lint: z.boolean().optional()` added to `ANCHOR_SCHEMA` — flows into the six scoped tools automatically via the schema spread. Added explicitly to `apply-patch`, `replace-all`, and `sed` inputSchemas (these don't use `ANCHOR_SCHEMA`).
-- Uses the same `lb.mainModule.provideMcpTools().find(t => t.name === "GetLinterMessages").execute()` API as `get-diagnostics`, with file scope forced and viewMode restored.
-- Wrapped in try/catch — any linter error produces null (silent).
-
-**Why opt-in:** Projects without linter-bundle (pure C + compiler-only workflows) would get silent null returns on every edit. Opt-in keeps output clean until explicitly requested.
-
-
-
-
-### Tool renames — align with Claude Code / MCP ecosystem convention
-
-- **`get-linter-messages`** → **`get-diagnostics`** — matches `mcp__ide__getDiagnostics` naming from Claude Code and the broader MCP ecosystem. Live on buffer, no save required.
-- **`get-diagnostics`** → **`get-compiler-diagnostics`** — clarifies that this tool runs the compiler (gcc/clang/cl) on the saved file on disk, distinct from the live linter tool above.
-
-LLMs trained on Claude Code patterns will now naturally reach for `get-diagnostics` and find the right tool.
-
-Also corrected the tool description: linter-bundle fires on `onDidChange` (debounced ~300ms) so `get-diagnostics` is **live on the buffer** — the previous description incorrectly stated "always call save-file first".
-
-### New search/read capabilities — `contextLines` + `occurrence` on grep tools
-
-All three grep/search tools now support scoped result narrowing on par with the edit tools:
-
-- **`grep-file`** — added `contextLines` (returns N lines before/after each match as `before`/`after` arrays) and `occurrence:N` (return only the Nth match and stop). Matches `grep-project` parity.
-- **`grep-project`** — `contextLines` and `occurrence` were already implemented; confirmed complete.
-- **`search-symbol`** — added `contextLines` and `occurrence` with the same pattern (globalIndex counter, early-exit labeled break, before/after arrays). Updated description.
-- **`find-text`** — upgraded from `buffer.findAllSync` to a line-scan approach. Added `contextLines` and `occurrence`. Each result now has `{ line, text, before?, after? }` consistent with grep-file output. Added try/catch for invalid regex (was missing).
-
-### `read-lines` full rewrite — hint-based range resolution
-
-`read-lines` no longer requires `startLine`/`endLine`. All parameters are now optional. New resolution modes:
-
-- **`centerLine` + `radius`** — return a window of N lines around a centre line
-- **`functionHint`** — scan for a named function, brace-count to find its body, return it
-- **`afterHint`** — return lines starting after the first occurrence of an anchor string
-- **`betweenHint: { start, end }`** — return lines between two anchor strings
-- **`lineNumberHint`** — alias for `centerLine` (radius defaults to 10)
-
-`startLine`/`endLine` still work as before for callers that know exact line numbers.
-
-### `delete-line-range` schema fix — hints were silently ignored
-
-**Bug fix:** `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineNumberHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented in its handler but none of them were declared in `inputSchema`. The LLM could never pass them — they were silently dropped. Fixed by spreading `ANCHOR_SCHEMA` into the inputSchema and making `startLine`/`endLine` optional (required only when no hint is provided).
-
-### `get-surrounding-context` removed
-
-Fully superseded by the `read-lines` rewrite. All call sites updated. Removed from `editStats`, `buildReport()`, `getEditStats()`, `resetEditStats()`, `tools[]` list, and `list-tools` handler.
-
-### Edit stats UI — dynamic tool list
-
-`showEditStats()` (Pulsar UI panel) previously used a hardcoded 14-entry `tools = [...]` array that was stale (included the removed `get-surrounding-context`, omitted `find_text`, `delete_block`, `sed`). Replaced with dynamic derivation from `Object.keys(editStats.session)` — the panel now always reflects the live tool set automatically.
-
-### Smart failure suggestion engine — fires on first failure, not third
-
-Replaced `failureSuggestion()` with `smartSuggestion(ctx)` + `successNudge(ctx)`:
-
-- **`smartSuggestion`** fires on **failure #1** (not #3). Detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds urgency. Escalates at consecutive failure **#2** (not #3).
-- **`successNudge`** appended to `str_replace` success responses when no hints were used on a file >300 lines — tells you which hints you should have used, and if `old_str` looks like a function body, specifically says to use `replace-function-body` next time.
-- Feedback fires at the **moment of failure in the tool response** — the only reliable way to change in-context behaviour.
-
-### Ambiguity guard — blocks silent wrong-occurrence edits
-
-`str_replace` now counts all occurrences of `effectiveOldStr` in the full file before committing. If `totalMatches > 1` and no scope hint is set (no `functionHint`/`afterHint`/`betweenHint`/`lineNumberHint` and `occurrence <= 1`), the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing all line numbers where it matches and the specific hints to use. Scan capped at 20 matches for performance.
-
-Previously `str_replace` with an ambiguous `old_str` would silently replace occurrence 1 — the most dangerous silent failure mode.
-
-`noScopeHint = false` when `occurrence > 1` (caller is already being deliberate about multiples).
-
-### Ambiguity guard extended to `replace-block`, `replace-function-body`, `delete-block`
-
-A shared `ambiguityCheck({needle, fullText, noScopeHint, toolName, isCodeFile})` helper now guards:
-
-- **`replace-block`** — checks anchor string before brace-matching
-- **`replace-function-body`** — checks function name via regex scan (`name\s*\(`) counting only definition-like occurrences, not call sites
-- **`delete-block`** — checks `startContent` before deleting
-
-### Bug fixes — search tool stats tracking
-
-- **`find-text` missing `bump()`** — `find-text` had no `editStats` entry and never called `bump()` on hit or miss. Added `find_text` to the stats initializer, `buildReport()`, `getEditStats()` (session + lifetime), and `resetEditStats()`. Added `bump('find_text', 'hits')` and `bump('find_text', 'fails', 'noMatch')` in the handler.
+- **Linting + test loop** — `get-diagnostics` and `get-compiler-diagnostics` exist but no automatic post-edit test runner. A `run-tests` tool that fires after edits and pipes failures back would close that gap.
 
 ---
 
-## 0.5.0
+### Post-edit structural integrity checks
 
-### Bug fixes — buffer integrity
+**Problem:** The inline linter (`lint:true` param) exists and works but is effectively invisible — it is not mentioned in any tool description string in TOOL_CATALOGUE, only in the Zod schema. As a result it is never passed by the LLM and provides zero value in practice. Separately, a whole class of post-edit failures (brace imbalance, unclosed block comments, `#if`/`#endif` imbalance) produce no feedback at all — the edit succeeds and the damage is silently compounded by subsequent edits.
 
-- **`replace-across-files` read pass** — was reading from disk (`fs.readFile`) even when a file was open with unsaved edits, then pushing the disk-based result into the live buffer via `setTextViaDiff`. Unsaved work in any open file matching the query was silently overwritten. Fixed by using `readFileOrBuffer` so the replacement is computed against the live buffer content.
-- **`replace-across-files` path comparison** — used bare `===` to find the open editor for a file path, instead of `path.resolve()` like every other tool. On Windows this caused a silent miss (path casing or separator difference), causing the tool to fall through to `fs.writeFile` and bypass the buffer entirely — losing undo history. Fixed to use `path.resolve()` consistently.
-- **`copy-file`** — used `fs.copyFile` which reads from disk, ignoring any unsaved edits in an open buffer. If the source file had unsaved changes the copy would be missing them silently. Fixed to detect an open editor for the source path and write from its buffer instead.
-- **`grep-project`** — read from disk only, returning stale results for any file with unsaved edits. LLM would then make edits based on line numbers that didn't match the live buffer. Fixed to use `readFileOrBuffer`.
-- **`search-symbol`** — same disk-only read issue as `grep-project`. Fixed to use `readFileOrBuffer`.
-- **`retargetEditor` fallback** (when `buffer.setPath` is unavailable) — after destroy+reopen+setText, the undo stack contained operations against the old file path. Calling undo could silently replay them against the wrong buffer. Fixed by calling `clearUndoStack()` after setText so the history is clean rather than corrupt.
-- **`create-file`** — if `workspace.open` failed after the file was already written to disk, the file was left as an orphan. Subsequent `create-file` calls would throw "file already exists" with no way to retry. Fixed by catching the open failure and unlinking the orphaned file before re-throwing.
+**Two tiers of fix:**
 
-### Improved failure diagnostics — partial match feedback
+**Tier 1 — always-on fast structural checks (per-edit, inline)**
 
-All four tools now return structured context on failure so the LLM can correct and retry in one step rather than making a separate read call:
+A new `lib/struct-check.js` module exporting `structuralIntegrityCheck(text, filePath)` — same call signature as `applyStyleCheck`, appends a warning suffix or empty string. Runs on the full buffer text after commit (not just `new_str` — brace delta is only meaningful at buffer scope). Single tokeniser pass tracking state `(NORMAL | LINE_COMMENT | BLOCK_COMMENT | STRING | CHAR)`. Checks:
 
-**`str_replace` — `occurrence:N` wrong**
-- Previously returned only "N matches found, you asked for M". Now also scans back and reports the actual line number of every match that *was* found, so the correct `occurrence:N` or a narrower `old_str` can be chosen immediately.
+- **Brace/bracket/paren balance** — `{ } [ ] ( )` delta. Flag if nonzero after edit.
+- **Unclosed block comment** — track `/*`/`*/` pairs; flag with line number of unclosed opener.
+- **`#if`/`#endif` balance** — preprocessor nesting depth; flag if nonzero at EOF.
 
-**`replace-function-body` — function name not found**
-- Previously listed similar function names as bare strings. Now includes each close match's actual current signature from the buffer, so a renamed function can be corrected without a `get-function-body` round trip.
+Wire into same 15 commit sites as `buildEditResponse` (which wraps `applyStyleCheck`): `str_replace`, `replace-function-body`, `insert`, `replace-document`, `replace-all`, `sed`, `apply-patch`, `delete-line-range`, `delete-block`, `replace-block`, `replace-across-files`, and all remaining handlers. Add `_structWarnings` counter to stats. Target ~150 lines, <2ms on a 1000-line file.
 
-**`delete-block` — `endContent` not found**
-- Previously returned only "endContent not found after line N". Now shows the 10 lines that follow the matched `startContent` anchor, so the correct `endContent` string can be picked without a separate `read-lines` call.
+**Tier 2 — token-stream state machine (per-edit, medium complexity)**
 
-**`replace-block` — brace match failures**
-- No opening `{` found: now shows the lines at and immediately after the anchor so the caller can verify whether it's a brace-delimited block at all.
-- Unmatched `{`: now shows the content from the opening brace line so a missing `}` or unexpected nesting can be spotted without a `read-lines` call.
+Extend the tokeniser with a depth-tracking register machine (~15 token types, no AST needed):
 
-**`replace-across-files` — silent skips**
-- Files that previously errored on read or write were silently dropped with `continue`. Now accumulated into a `skipped` array with the error reason and returned alongside `files` in the response. Write failures are also caught and reported rather than throwing uncaught. `skippedCount` is always present in the return value.
+- **Missing `break` in switch case** — track `SWITCH_BODY` mode; flag `case:` reached without preceding `break`/`return`/`/* fallthrough */`.
+- **Keyword not followed by brace** — after `if(...)`/`for(...)`/`while(...)`, next non-whitespace token must be `{`. Flags dangling-body patterns.
+- **Unreachable code after `return`** — code following `return` at same brace depth before next `}` or `case`.
+- **Duplicate `case` values** — tokenise and deduplicate case labels within a switch.
 
----
+**Tier 3 — `verify-file` tool (end-of-task, explicit)**
 
-## 0.4.0
+A new `verify-file` tool bundling: full-buffer structural integrity (Tiers 1+2), linter snapshot (whole file), style report, and optionally compiler diagnostics. Tool description: *"Call this before reporting a task complete on any code file."* Addresses the Verification & Termination failure class — makes verification a named step in the protocol, not an ad-hoc memory item.
 
-### New tools (P1–P8 from llm-edit-failure-modes.md)
+**Always-on, non-disableable — design principles:**
 
-**Edit**
-- `get-region` — Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed.
-- `delete-block` — Delete lines between two content anchors (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed.
-- `replace-block` — Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs).
+Remove the `lint` param entirely rather than defaulting it to `true`. No escape hatch at the tool level — the LLM should not be able to suppress its own safety net. Silent when clean means no opt-in is needed anyway.
 
-**Debugging**
-- `get-edit-stats` — Return per-tool edit statistics for the current session AND lifetime totals across all sessions. SESSION: counters since last server restart. LIFETIME: cumulative totals loaded from `edit-stats.json`, survives restarts. Covers all edit tools (`str_replace`, `insert`, `delete-line-range`, `replace-function-body`, `replace-block`, `apply-patch`, `replace-all`, `replace-document`, `sed`, `delete-block`) and all search tools (`grep-file`, `grep-project`, `search-symbol`, `find-text`, `replace-across-files`). Tracks hits, fail reasons (`noMatch`, `whitespace`, `partialMatch`, `outOfScope`, `afterNotFound`, `wrongOccurrence`, `skipped`), hint usage (including `occurrence` and `contextLines` for search tools), fuzzy-whitespace commit count, average `old_str` length, and dry-run count. Pass `reset:true` to flush session into lifetime, increment `sessionCount`, and zero session counters. Lifetime data persists to disk on reset and on server shutdown.
-- `session-notes` — Persistent cross-session LLM notes. `action:write` appends a note (failures, fixes, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Survives server restarts. Stored in `session-notes.json` in the package root. Optional `project` field groups notes by codebase. This is the mechanism that turns per-session failure reasoning into persistent cross-session memory.
+The key design requirement to make always-on non-annoying is **delta checking** — compare post-edit state against pre-edit baseline captured just before the buffer write:
 
-### New features on existing tools
+- **Structural checks (brace/comment/#if balance):** only warn if the imbalance is *worse* than before the edit. Capture pre-edit counts, compare post-edit counts, warn only if `post > pre`. This suppresses false positives during multi-call rewrites — a deliberate two-step rewrite with an intermediate imbalanced state won't false-positive because the delta is zero on the first step.
+- **Linter:** capture the set of linter message digests before the edit, compare after. Only surface messages that are *new* — pre-existing errors are not the LLM's fault on this edit and shouldn't appear in this response. This is strictly better than the current opt-in behaviour which either shows everything or nothing.
 
-**`str_replace`**
-- `afterHint` — Start the search after the first occurrence of a content string in the file. Content-stable equivalent of `lineNumberHint`, immune to line-number drift.
-- `betweenHint: { start, end }` — Restrict the search to the region between two anchor strings. More precise than `afterHint` alone; useful for switch cases, struct blocks, `#ifdef` regions.
-- `occurrence:N` — Replace the Nth match instead of the first. Fixes duplicate-pattern confusion without needing to widen `old_str`.
-- `fuzzyWhitespace:true` — Match ignoring per-line indentation differences; commit using the buffer's actual whitespace. Eliminates the most common retry loop (fail → read → fix indent → retry).
+Implementation: each edit tool captures `preEditSnapshot()` (brace counts + linter message set) before `buffer.setTextInRange(...)`, then calls `postEditDelta(pre, post)` to produce the suffix. Both helpers are stubbed in `lib/edit-response.js`; the tokeniser logic will live in `lib/struct-check.js` and be called from there.
 
-**`insert`**
-- `afterContent` / `beforeContent` — Content-anchored insert: find the anchor string and insert after/before it. Immune to line-number drift. Preferred over `insert_line` wherever possible. Supports `functionHint` and `occurrence:N` for scoping.
-
-### Edit Stats panel (Pulsar UI)
-
-- **Packages → MCP Server → Show Edit Stats...** opens a live stats panel showing hits, fail reasons, hint usage, and fuzzy-whitespace commit counts per tool for the current session.
-- A **Reset Counters** button zeroes all session stats without requiring a server restart.
-- Also accessible via right-click context menu on any editor.
-
-### Stats instrumentation in mcp-registration.js
-
-- Module-scope `editStats` accumulator tracks per-tool hits, fails (classified by reason), hint usage, dry-run count, and `_oldStrLenSum` (used to compute `avgOldStrLines` on read).
-- `getEditStats()` and `resetEditStats()` exported for use by the Pulsar UI panel.
-- Stats reset on server restart; optionally resetable mid-session via tool or panel.
+**Complexity:** Tier 1 = Low-Medium (delta snapshot adds state). Tier 2 = Medium. Tier 3 = Low.
 
 ---
 
-## 0.3.0
+### Session-notes policy schema (deferred — architecture decision)
 
-### Breaking renames
+**Background:** Reviewed suggestion to restructure session notes from free-text into a structured policy/state-machine schema with fields: `task_class`, `file_class`, `failure_class`, `recommended_tool`, `recommended_hints`, `confidence`, `last_seen`, `success_count`, `failure_count`, `deprecated`, `priority_score`.
 
-- `replace-text` → **`str_replace`** — aligns with the Claude Code / Cline convention and makes the tool's primary behaviour (exact-string replacement) unambiguous.
-- `insert-text-at-line` → **`insert`** — shorter, consistent with the Claude Code `insert` tool.
+**Assessment — do not implement yet.**
 
-Any existing prompts or system instructions that reference the old names must be updated.
+The schema solves a problem that doesn't exist in the current architecture. Notes are read once at session start by the LLM; there is no server-side selection layer. Adding structured fields without a selection layer adds maintenance overhead with no runtime benefit — the LLM still reads all notes and interprets them opportunistically regardless of schema.
 
-### New features on existing tools
+The schema becomes valuable only if the server intercepts tool calls and injects relevant policy inline at the point of use. The inline nudge pattern (`smartSuggestion`, `[lineNumberHintFallback]` warnings) is already the proven delivery mechanism for this — it lands policy at the exact decision point, not front-loaded in session notes the LLM may have deprioritised 30 tool calls ago.
 
-**`str_replace` (formerly `replace-text`)**
-- `functionHint` — scope the search to a named function body only. The match is rejected if `old_str` is not found inside that function. Immune to line-number drift; preferred for JS/C edits.
-- `lineNumberHint` — start the search at or after a specific 1-based line. Useful when the same text appears multiple times and `functionHint` is not applicable.
-- `dryRun` — preview the match and surrounding context without writing. Returns matched lines with `►` markers. Commit by re-calling without `dryRun`.
-- **Smart failure diagnostics** — on a no-match, the tool now: (a) reports whitespace/indentation differences line-by-line for each `old_str` line whose trimmed content exists in the buffer, (b) reports partial consecutive-line match count before divergence, (c) finds the closest fuzzy area via word-scoring and shows it with line numbers. Consecutive failure counter triggers a tool-switch suggestion after 3 failures.
+**What to do instead (low cost, immediate value):**
+- Add `[DEPRECATED]` prefix to obsolete session notes so the LLM skips them.
+- Add `failure_class:` tag as free text to new notes — enables future grep/categorisation if a selection layer is built.
+- If a selection layer is ever built, only two fields are load-bearing: `deprecated`/`superseded_by` and a `priority_score` or `success_count`/`failure_count` pair. Everything else is analytics.
 
-**`insert` (formerly `insert-text-at-line`)**
-- `dryRun` — preview what will be inserted and where, with surrounding context, before committing.
-- Out-of-range line numbers now return a diagnostic with the end-of-file context and a failure counter.
-
-**`delete-line-range`**
-- `dryRun` — shows the lines that would be deleted (marked `✂`) with surrounding context before committing.
-- Out-of-range inputs now surface a diagnostic with the end-of-file context.
-
-**`replace-all`**
-- `dryRun` — previews all match locations (up to 20 shown) before committing. Fuzzy area hint on zero-match responses.
-
-**`replace-function-body`**
-- `dryRun` — shows current function span with `►` markers and the replacement diff before committing.
-- Warns when the first line of `newBody` differs from the existing signature (silent signature-change risk).
-- On not-found: fuzzy function-name scoring suggests the closest matching names in the file.
-
-**`apply-patch`**
-- `dryRun` — validates the patch and shows a compact `+/-` diff of what would change without writing.
-- Large-edit warning when a patch touches more than 30% of the file — suggests `replace-document` or `replace-function-body` for better token efficiency.
-- On failure: fuzzy context-line scoring finds the closest matching area in the buffer and shows it with line numbers.
-
-**`grep-file`**
-- `filePath` is now optional — omit to search the active editor buffer directly.
-
-**`get-file-summary`** and **`get-includes-and-defines`**
-- `filePath` is now optional — omit to summarise the active editor.
-
-### Moved to correct group
-
-- `get-active-editor-info` — now correctly documented in the **Navigation** group (it was erroneously listed under Core in the README).
+**Revisit if:** session notes exceed ~25 entries and the LLM demonstrably starts missing older ones, or a tool-intercept architecture is built for `verify-file` / per-step approval.
 
 ---
 
-## 0.2.0
+## Feature Gap Analysis — vs Other Tools (researched 2026-06-04)
 
-### New Tools
+### What we have that others don't
+- **Kernel C style checker** — inline, per-edit, rule-level violation reporting. No other tool does language-specific style at this depth.
+- **naming-checker** — verb-segment, camelCase, doc skeleton generation. Unique.
+- **Ghidra integration** — reverse engineering workflow. Unique.
+- **Edit stats + hints system** — tracks hit/fault rates per tool, surfaces smarter suggestions based on failure patterns. Unique.
+- **Self-updating project rules + repo map** — `session-notes` acts as a living CLAUDE.md: the LLM writes its own codebase-specific rules, tool preferences, and lessons learned, then reads them back at the start of every session. Combined with `get-repo-map` at session start, the LLM arrives with full structural context and accumulated knowledge of what works on this codebase. Better than a static user-written rules file because it improves automatically.
+- **`@//` prompt shortcuts** — named prompt templates in `shortcuts.md`, invokable from the chat input with live filter dropdown. Functionally equivalent to Windsurf Cascade workflows at a fraction of the complexity.
+- **apply-patch fuzzy rescue** — fuzzy rescue confirm:true flow implemented but apply-patch itself (0/40 lifetime hits) is effectively deprecated. The fuzzy infrastructure remains in place for future use.
+- **Tree-sitter symbol resolution** — all hint/anchor resolution (afterHint, betweenHint, functionHint) backed by tree-sitter live buffer. Regex fallback for unsupported grammars (Ghidra decompiled C). Unique depth for a Pulsar extension.
 
-**File Operations**
-- `move-file` — Move or rename a file. If the file is open in a Pulsar tab the buffer is retargeted in-place using `buffer.setPath()`, preserving full undo history.
-- `copy-file` — Copy a file to a new path and open the copy in a new tab.
-- `rename-file` — Rename a file within its current directory. Tab retargeted in-place; undo history preserved.
-- `create-folder` — Create a directory (and any missing parents) at a given path.
-- `rename-folder` — Rename or move a folder. All open editor tabs inside the folder are retargeted to their new paths automatically; undo history preserved per tab.
-- `read-lines` — Read a specific line range from any file without loading the whole file. Buffer-first when the file is open in Pulsar.
-- `file-line-count` — Return the line count of any file without loading its content. Buffer-first when the file is open in Pulsar.
-- `apply-patch` — Apply a unified diff patch to the active editor buffer. Context-line anchored so it survives minor line number drift. Tracks consecutive failure count and suggests alternative tools after repeated failures. Supports `dryRun` mode.
-- `list-project-functions` — List every function definition across all project files (or a glob-filtered subset).
-- `replace-function-body` — Atomically replace a named function's full signature and body in the active editor in a single operation, avoiding line-number shifting.
-- `replace-all` — Replace all occurrences of a string in the active editor.
-- `replace-across-files` — Find and replace across all project files with glob filtering and `dryRun` support. Open files updated via buffer (undo preserved); closed files written to disk.
+### What others have that we don't — gap table
 
-**Navigation**
-- `goto-line` — Jump the cursor to a specific line (and optional column) in the active editor.
-- `list-open-files` — List all files currently open in editor tabs.
-- `get-surrounding-context` — Return lines around a target line without loading the whole file.
-- `get-active-editor-info` — Quick metadata check (filename, line count, cursor position, language, modified status) without loading the full document.
+| Feature | Cursor | Windsurf | Cline | Claude Code | Us | ★ Unique to us | Notes |
+|---|---|---|---|---|---|---|---|
+| Plan mode (describe task → plan → approve) | ✅ | ✅ | ✅ | ✅ | ❌ | | High value. LLM proposes step-by-step plan in chat before touching files. User approves/edits plan first. |
+| Per-step approval in agentic runs | ✅ | ✅ | ✅ | ✅ | ❌ | | Each tool call shows intent + asks confirm before executing. |
+| Inline diff in editor (green/red decorations) | ✅ | ✅ | ❌ | ❌ | ❌ | | Already in plan as visual diff decorations. Cursor-only due to fork. |
+| Inline diff in chat panel | ❌ | ❌ | ❌ | ✅ (partial) | ❌ | | Already in plan. |
+| Reusable task workflows / recipes | ❌ | ✅ Cascade | ❌ | ❌ | ✅ `@//` | ★ | `@//` shortcuts in `shortcuts.md` — named prompt templates with live filter dropdown. Equivalent to Windsurf Cascade workflows, simpler format. |
+| Context window usage indicator | ❌ | ❌ | ✅ | ✅ | ❌ | | Token count + cost per interaction shown in chat. Low-medium value. |
+| Auto context compaction / summarisation | ❌ | ❌ | ❌ | ✅ /compact | ❌ | | Summarises old history to free window. Medium value for long sessions. |
+| CLAUDE.md / project rules file | ❌ | ❌ | ❌ | ✅ | ✅ | ★ | Covered by session-notes: LLM writes and self-updates its own rules, tool preferences, and lessons. Read back at every session start. Better than a static file — improves automatically with use. |
+| Codebase orientation / repo map on startup | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | get-repo-map called at session start gives full structural context. Combined with session-notes, the LLM arrives knowing both the code layout and accumulated lessons for this project. |
+| Multi-agent / parallel agents | ✅ (8x) | ✅ Cascade | ✅ Kilo fork | ✅ Agent tool | ❌ | | Complex. Out of scope for single-server architecture. |
+| Arena mode (compare model outputs) | ❌ | ✅ | ❌ | ❌ | ❌ | | Run same task on 2+ models, pick winner. Interesting but niche. |
+| Auto model selection per task | ✅ Auto | ❌ | ❌ | ❌ | ❌ | | Cursor picks best model automatically. We have manual model combobox with persistence. |
+| Browser / web access during task | ❌ | ❌ | ✅ | ✅ | ❌ | | Cline/Claude Code can fetch URLs mid-task. run-command + curl is a workaround. |
+| Spend / token limit guard | ❌ | ❌ | ✅ | ❌ | ❌ | | Cline v3.78 added spend limit UI to stop runaway agents. |
+| .cursorrules / per-project AI config | ✅ | ❌ | ❌ | ❌ | ❌ | | Per-project rules file that shapes AI behaviour. We cover this via session-notes (see above). |
+| Checkpoint / restore mid-task | ❌ | ❌ | ✅ shadow git | ❌ | ✅ buffer + disk | ★ | Buffer checkpoints in place. Disk-backed checkpoints in TODO — survive hot-reload. Git integration also in TODO. |
+| Kernel C style checking (inline per-edit) | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Per-edit violation reporting scoped to changed lines. Rule-level breakdown. checkpatch for full-file audit. |
+| Function naming + doc skeleton generation | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | namingcheck, check-function-docs, insert-function-doc. Kernel C only. |
+| Ghidra reverse engineering integration | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Full RE tool suite via Ghidra MCP bridge. |
+| Edit stats + smart failure suggestions | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | Per-tool hit/fault/hint tracking. Surfaces tool-switch suggestions on first failure, not third. |
+| Persistent cross-session LLM notes | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | session-notes tool. LLM writes lessons learned; reads them back next session. Self-improving — no user maintenance needed. |
+| Aider-style repo map (tree-sitter) | ❌ | ❌ | ❌ | ❌ | ✅ | ★ | get-repo-map with PageRank symbol ranking. Integrated natively, no Aider install needed. |
+| apply-patch fuzzy rescue | ❌ | ❌ | ❌ | ❌ | ⚠️ | | Fuzzy rescue with confirm:true flow implemented. apply-patch has 0 lifetime hits — effectively deprecated in favour of str_replace. Infrastructure retained. |
 
-**Safety**
-- `checkpoint` — Save a named in-memory snapshot of the current buffer, restorable with `restore-checkpoint`.
-- `restore-checkpoint` — Restore the buffer to a named checkpoint.
-- `list-checkpoints` — List all saved in-memory checkpoints.
-- `diff-preview` — Show a unified diff of proposed changes without applying them.
+### Highest value gaps to consider
 
-**Search**
-- `grep-file` — Search a file for a pattern and return matching lines. Reads from the live buffer when the file is open in Pulsar.
-- `grep-project` — Search all project files for a pattern.
-- `search-symbol` — Find all uses of a C symbol across project files using whole-word matching.
+1. **Plan mode** — describe task → LLM outputs numbered step plan in chat → user approves/edits → execution begins. Prevents wasted edits on misunderstood tasks. All four major tools have this. Could be a chat panel mode toggle (`/plan` prefix or Plan button). LOW-MEDIUM implementation complexity — it's a prompting/UX pattern, not a new tool.
 
-**Diagnostics**
-- `get-diagnostics` — Syntax-check the active C/C++ file (or all project C/C++ files) using the available compiler (gcc / clang / cl). Runs against the saved file on disk.
+2. **Per-step approval** — before each tool call in an agentic run, show intent in chat and wait for user confirm. Cline's defining UX. Pairs naturally with plan mode. MEDIUM complexity — requires chat panel to intercept tool dispatch.
 
-**Debugging**
-- `get-debug-log` — Return recent MCP tool call log entries. Supports `tail`, `filter` by keyword, and `clear`.
+3. **Context window indicator** — show token usage in chat panel header. MEDIUM-LOW complexity — needs token counting on the callLLM response (usage field already in API response).
 
-**Highlight**
-- `highlight-range` — Visually highlight a line range in the active editor with a timed fade.
+4. **Disk-backed checkpoints** — now in TODO above (💾 LOW). Git integration also in TODO (🔀 LOW).
 
-**Core additions**
-- `get-file-summary` — Structural summary of a file: functions, includes, defines, and TODOs.
-- `save-all` — Save all modified open editor tabs in one call.
-- `list-tools` — List every tool with group and enabled/disabled status. Intended as a session-start call so the LLM knows what is available without loading all schemas.
-- `enable-group` — Enable a disabled tool group at runtime without reloading Pulsar.
-
-**Ghidra group** (disabled by default)
-- Full suite of Ghidra reverse-engineering tools: `list-functions`, `search-functions`, `get-function-body`, `get-xrefs`, `add-comment`, `get-function-list-with-comments`.
-
-### Improvements
-- **Buffer-first reads** — `read-file`, `read-lines`, `grep-file`, `get-includes-and-defines`, and `file-line-count` all read from the live Pulsar buffer when a file is open, so unsaved edits are always visible without requiring a save first.
-- **Lazy-load tool discovery** — Tools are grouped and schemas are only sent to the LLM when a group is first used, reducing per-session token overhead.
-- **Tool groups** — All tool groups can be enabled/disabled in Settings. Groups can be re-enabled at runtime by the LLM via `enable-group` with no Pulsar restart needed.
-- **Windows support** — `run-command` auto-detects PowerShell on Windows. Glob matching is normalised for Windows paths.
-- **apply-patch failure tracking** — consecutive patch failures are counted per session; after 3 failures the tool advises the LLM to switch strategy.
-- **Decoration system** — Edited lines are highlighted in the editor after every MCP edit operation, with an 8-second fade.
-- **Bug fix** — Removed duplicate `const resolvedSrc` declaration in `rename-folder` that caused a parse error on server startup.
-- **Stale description fixes** — `move-file` and `rename-folder` tool descriptions and catalogue entries updated to correctly reflect that open tabs are retargeted in-place (undo history preserved), not closed and reopened.
-- **Emergency revert system** — Server source files (`mcp-registration.js`, `pulsar-edit-mcp-server.js`, `ghidra-tools.js`) are automatically snapshotted on every Pulsar startup and on every save. Up to 5 timestamped backups per file are kept in `.mcp-backups/` (gitignored). A restore modal is accessible via `Ctrl+Alt+Shift+R`, the right-click context menu, or the Packages menu — completely independent of the MCP server so it works even when the server is crashed. Restoring writes the file to disk, updates the open buffer in Pulsar if the file is open, and restarts the MCP server automatically. Note: if the package itself failed to load due to a parse error, a Packages → Reload Packages or full Pulsar restart is still needed after restoring.
+5. **Reusable workflows** — named prompt+tool recipes stored in a JSON file, invokable by name from chat. Windsurf Cascade's killer workflow feature. MEDIUM complexity. `@//` shortcuts cover the prompt-template use case already — this would add tool sequencing on top.
 
 ---
 
-## 0.1.0 - First Release
+## Edit Strategy (key rules)
 
-Initial development based on:
-* https://github.com/coppolaf/pulsar-edit-mcp-server/commit/f24558a80339c11f8dc063571aa12f9e1f3221b5
-
-### Tools included at fork point
-- `replace-text` — Search the active editor for `query` and replace it with `replacement`.
-- `get-context-around` — Return up-to `radiusLines` lines before and after the N-th match of `query` in the active editor.
-- `find-text` — Search the active editor for a substring or regular expression and return positions of each occurrence.
-- `replace-document` — Replace entire contents of the document.
-- `insert-line` — Insert a blank line at row.
-- `insert-text-at-line` — Insert a block of text at a specified line number, shifting existing text down.
-- `delete-line` — Delete a single line.
-- `delete-line-range` — Delete a range of lines.
-- `get-selection` — Get the selected text.
-- `get-document` — Get an array of each line in the document with line numbers.
-- `get-line-count` — Get the total number of lines in the current document.
-- `get-filename` — Get the filename of the current document.
-- `get-full-path` — Get the full path of the current document.
-- `get-project-files` — Get all project files in the current project.
-- `open-file` — Open a file (or move to that file's tab if already open).
-- `undo` — Undo the last change in the editor.
-- `redo` — Redo the last undo in the editor.
+- `open-file` before any str_replace — buffer must be active
+- `fuzzyWhitespace:true` as default for mcp-registration.js (mixed indentation throughout)
+- `afterHint` on unique nearby string is the most reliable scope anchor; `betweenHint` when afterHint is ambiguous
+- `dryRun:true` before any str_replace with old_str > 5 lines
+- `replace-function-body` first for whole-function rewrites
+- `replace-block` for `{}` brace blocks ONLY — never `[]` array literals
+- `save-all` after every edit — never batch edits without saving between them
+- Saving mcp-registration.js triggers hot-reload — checkpoints wiped, MCP server cache restarts
+- **Reload procedure:** close Pulsar → delete `.pulsar/compile-cache/js/babel/` → reopen Pulsar → restart Claude Desktop
+- `betweenHint` is the best disambiguator when `afterHint` hits an earlier occurrence
+- `$1`/`$2` backreferences in `replace-across-files`/`replace-all`/`sed` replacement strings work correctly (fixed v0.10.27 via `applyReplacement`).
+- `replace-across-files` glob must always be `lib/*.js`, never `**/*.js` — the latter hits `.mcp-baseline/` which is a read-only backup and must never be modified. `replace-across-files` has no excludeGlob param so a positive lib/ scope is the only safe option. Same applies to `grep-project` when searching for edit targets.
+- `functionHint` never on .md files — use lineNumberHint or afterHint instead
+- `grep-file` before str_replace on any file to confirm exact anchor text and line numbers
+- chat-panel.js and .less changes require Pulsar package reload — they do NOT hot-reload on save

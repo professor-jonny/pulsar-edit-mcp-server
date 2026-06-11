@@ -2,4 +2,10 @@
 npm-debug.log
 node_modules
 package-lock.json
-.mcp-baseline/`n.mcp-broken/
+.mcp-baseline/
+.mcp-broken/
+
+# Runtime data — machine-specific, not for version control
+failure-log.ndjson
+edit-stats.json
+session-notes.json

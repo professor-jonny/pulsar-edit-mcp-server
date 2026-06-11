@@ -2,7 +2,9 @@
 
 An MCP (Model Context Protocol) server and built-in chat assistant that lets an LLM control the [Pulsar](https://github.com/pulsar-edit) editor. Use the built-in chat panel or any compatible external client such as [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm) or [Claude.ai](https://claude.ai).
 
-Tools have been curated from Ghidra, Cline, and Claude Code into a single package, then extended with instrumentation, failure recovery, and persistence features that no other tool has. A lazy-load discovery mechanism means the LLM is aware of all tools without paying the token cost of loading every schema upfront.> **Beta software** — tested but not production-hardened. Bug reports and suggestions are welcome!
+Tools have been curated from Ghidra, Cline, and Claude Code into a single package, then extended with instrumentation, failure recovery, and persistence features that no other tool has. A lazy-load discovery mechanism means the LLM is aware of all tools without paying the token cost of loading every schema upfront.
+
+> **Beta software** — tested but not production-hardened. Bug reports and suggestions are welcome!
 
 ---
 
@@ -103,16 +105,22 @@ All three can be layered. `get-repo-map` now appends a `[unicode]` flag to files
 
 ### 📦 Shared library architecture — tools as declarative configs (in progress)
 
-`mcp-registration.js` is being refactored from a monolith into a set of shared libraries that each tool calls into. Libraries extracted so far:
+`mcp-registration.js` has been refactored from a ~8007-line monolith into a set of focused shared libraries. The main file is now **~6693 lines** (−16%). Libraries extracted so far:
 
-- **`lib/style-checker.js`** — kernel C style rules, `applyStyleCheck`, `isKernelFile`
-- **`lib/naming-checker.js`** — `checkNaming`, `checkFunctionDocs`, `buildDocSkeleton`
-- **`lib/tree-sitter-symbols.js`** — `getSymbols`, `resolveAnchor`, `findFunction`, `braceEndRow`
-- **`lib/edit-response.js`** — `buildEditResponse`, `preEditSnapshot`, `postEditDelta`
-- **`lib/struct-check.js`** — `snapshot`, `delta`
+- **`lib/edit-stats.js`** — session/lifetime stats, `bump()`, `bumpStyle()`, `flushLifetimeStats()`, `syncToLifetime()`, `summarise()`, `buildReport()`, `buildStyleReport()`, process exit hooks
+- **`lib/tool-hints.js`** — `anchorError()`, `smartSuggestion()`, `successNudge()`, `ambiguityCheck()`, consecutive failure counter objects
+- **`lib/buffer-helpers.js`** — `walkDir()`, `resolveStructuralAnchor()`, `findAnchor()`, `findFunctionInBuffer()`, `readFileOrBuffer()`, `retargetEditor()`
+- **`lib/lint-helpers.js`** — `maybeLintSuffix()`, `lintSnapshot()`
+- **`lib/tool-catalogue.js`** — `TOOL_CATALOGUE` array, `TOGGLEABLE_GROUPS` array
+- **`lib/schema.js`** — `ANCHOR_SCHEMA`, `STRUCTURAL_ANCHOR_SCHEMA` Zod schemas
+- **`lib/style-checker.js`** — kernel C style rules, `applyStyleCheck()`, `isKernelFile()`
+- **`lib/naming-checker.js`** — `checkNaming()`, `checkFunctionDocs()`, `buildDocSkeleton()`
+- **`lib/tree-sitter-symbols.js`** — `getSymbols()`, `resolveAnchor()`, `findFunction()`, `braceEndRow()`
+- **`lib/edit-response.js`** — `buildEditResponse()`, `preEditSnapshot()`, `postEditDelta()`
+- **`lib/struct-check.js`** — `snapshot()`, `delta()`
 - **`lib/string-utils.js`** — pure utilities: `escapeRegex`, `applyReplacement`, `globToRegex`, `levenshteinDistance`, `calculateSimilarity`
 
-The end goal is `lib/tool-framework.js` — a `registerMcpTool()` wrapper where each tool is a declarative config object and all cross-cutting concerns (stats, dryRun, consecutive failure counters, style/lint/struct checking) are handled centrally. Phase 0 (data-driven `summarise`/`buildReport`) and Phase 1 (framework + 2 tool PoC) are next.
+The end goal is `lib/tool-framework.js` — a `registerMcpTool()` wrapper where each tool is a declarative config object and all cross-cutting concerns (stats, dryRun, consecutive failure counters, style/lint/struct checking) are handled centrally.
 
 
 <img src="https://github.com/user-attachments/assets/52c74f89-d76f-4faa-9265-009bdc78c32c" width="700" />
@@ -121,9 +129,21 @@ The end goal is `lib/tool-framework.js` — a `registerMcpTool()` wrapper where 
 
 <img src="https://github.com/user-attachments/assets/5e796c45-c0e8-4e15-a9db-1b5dcb27057d" width="700" />
 
+**Shortcut use:**
+
+<img src="https://github.com/professor-jonny/pulsar-edit-mcp-server/blob/main/assets/shortcut_use.jpg" width="700" />
+
 **Stats panel:**
 
 <img src="https://github.com/professor-jonny/pulsar-edit-mcp-server/blob/main/assets/stats.jpg" width="700" />
+
+**Fault Log**
+
+<img src="https://github.com/professor-jonny/pulsar-edit-mcp-server/blob/main/assets/fault_log.jpg" width="700" />
+
+**Fault Log Entry**
+
+<img src="https://github.com/professor-jonny/pulsar-edit-mcp-server/blob/main/assets/fault_log_entry.jpg" width="700" />
 
 ---
 
@@ -276,6 +296,7 @@ Always loaded. Cannot be disabled.
 | Tool | Description |
 |---|---|
 | `get-debug-log` | Return recent MCP tool call log entries. Supports `tail` (default 20, max 100), `filter` by keyword, and `clear` to wipe the buffer |
+| `get-failure-log` | Query `failure-log.ndjson` — the structured failure capture log written on every `str_replace`/`insert`/`replace-block`/`replace-function-body` noMatch. Supports `tail` (default 20, max 200), `tool`, `reason`, and `filePath` filters. Each entry includes `diffVsBuffer`, `bufferPreview`, `oldStrPreview`, and full hint context. Use this after a noMatch to understand exactly what the buffer contained at the failure site |
 | `get-diagnostics` | Return live linter diagnostics from linter-bundle (errors, warnings, info). **Live on buffer — no save needed.** `scope: 'file'` (default) returns messages for the active editor; `scope: 'project'` returns all messages across open files. Works for any language with a linter provider installed (JS, TS, C, C++, and others). Returns `[]` gracefully if linter-bundle is not active |
 | `get-edit-stats` | Return per-tool edit statistics for the current session and lifetime totals (persisted in `edit-stats.json`). Covers all edit tools and all search tools (`grep-file`, `grep-project`, `search-symbol`, `find-text`, `replace-across-files`). SESSION: counters since last restart. LIFETIME: cumulative across all sessions. Tracks hits, fail reasons, hint usage (including `occurrence`/`contextLines` for search tools), dry-run count, fuzzy whitespace commits, and average `old_str` length. Pass `reset:true` to flush session into lifetime and zero session counters |
 | `session-notes` | Persistent cross-session notes written by the LLM. `action:write` appends a note (what failed, what fix worked, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Notes survive server restarts and are stored in `session-notes.json` in the package root |
@@ -298,15 +319,13 @@ Reverse-engineering tools for working with Ghidra-exported C source code. Enable
 Ghidra's decompiler output is pseudocode — it does not guarantee the exported C is valid or compilable. This group bridges that gap:
 
 - Run the exported C through a real compiler (`gcc`/`clang`) which understands C semantics properly
-- allow manipulation of c code that is disallowed in ghidra.
+- Manipulate C code in ways that are not possible inside Ghidra itself
 - Use `clang-tidy` or similar for genuine lint feedback on type errors and bad C
 - `get-function-list-with-comments` tracks cleanup progress — annotated functions vs unnamed `FUN_` stubs at a glance
 - `get-function-body` is useful when asking the LLM to document or rewrite decompiled functions
 - `replace-function-body` rewrites a cleaned-up function atomically without disturbing surrounding code
-- handy to understand and document code for re implementing it.
-- handy to patch and compile small source code edits to generate assembler code for inserting it into binary's.
-
-
+- Useful for understanding and documenting decompiled code prior to re-implementation
+- Patch and compile small source edits to generate assembler for binary patching workflows
 
 | Tool | Description |
 |---|---|
@@ -345,9 +364,9 @@ The built-in chat panel serves two roles: an LLM chat interface (when an API key
 ```
 The file is re-read on every trigger — edits take effect without reload. If `shortcuts.md` does not exist it is auto-created with sample content on first chat panel open.
 
-### tool metrics
-- the tools have failure counters and if triggered will alert thee llm that maybe the choice of tooling is not correct or they are using it wrong
-- this is to steer LLMs to use the correct tool for the job.
+### Tool metrics
+
+Every edit tool has per-failure-reason counters. When consecutive failures cluster, the tool surfaces a targeted suggestion — switch hint, switch tool, add `fuzzyWhitespace` — rather than returning a bare noMatch. This steers the LLM toward the correct approach without requiring it to manually diagnose the failure class.
 
 ### tool description decision ladders
 
@@ -407,20 +426,21 @@ When a tool fails partway through, it returns structured context so the LLM can 
 - `afterContent` / `beforeContent` on `insert` anchor the insertion point by content string rather than line number — immune to drift
 - `delete-block` and `get-region` use start/end content strings instead of line numbers throughout
 
-### buffer and history
-- All edits are to be done on live open files except for some system wide replaces
--  if files are open the direct disk edits are changed not allowed and in stead edited in the buffer.
--  this is so that the buffer and file is not left in an inconsistent state.
+### Buffer and history
 
-### mass rename matching
-- operations across multiple files can accidentally alter documentation or binarys expecially with small edits.
-- this can be used to narrow the scope of the files by glob or match file name etc...
+All edits operate on the live Pulsar buffer rather than writing directly to disk. When a file is open, disk writes are routed through the buffer so the file and editor are never left in an inconsistent state. Undo history is fully preserved.
 
-### buffer and undo history
-- undo and buffer history is preserved if files or folders are renamed or moved.
+### Mass replace scoping
 
-### dry run
-- used to show hits on patches and return diff like responses to give the user the option to view the expected output, and fix matches
+Cross-file operations like `replace-across-files` can unintentionally touch documentation, binary assets, or generated files if the scope is too broad. Use the `glob` parameter to restrict replacements to the intended file set, and always review the dry-run preview before confirming.
+
+### Undo history on file operations
+
+Undo and redo history is preserved when files or folders are renamed or moved — open tabs are retargeted in-place via `buffer.setPath()` rather than closed and reopened.
+
+### Dry run
+
+Pass `dryRun:true` to any edit tool to preview the match and proposed change without writing anything. Returns a diff-style response showing what would be replaced and where. Use this before committing any multi-line edit you're uncertain about.
 
 ### session notes and edit stats
 
@@ -488,7 +508,7 @@ A restore only rewrites the file and restarts the HTTP server. If the package it
 1. **Packages → MCP Server → Restart Server**
 2. **Packages → Reload Packages** (or `window:reload` from the command palette)
 3. Full Pulsar restart as a last resort
-4. Restart the LLM client as some cant handle hot loading of tools.
+4. Restart the LLM client — some clients don't handle hot-reloaded tool lists gracefully.
 
 ### WARNING ###
 > ⚠️ **Security Warning:** `run-command` has unrestricted shell access — any command can be executed. Destructive commands (`rm`, `Remove-Item`, `del`, `format` etc.) show a **Run / Cancel** confirmation widget in the chat panel before executing. Pass `confirm:true` to bypass this for automated workflows. **The confirmation check is pattern-based and not exhaustive** — commands that achieve destructive results indirectly (e.g. `patch`, `git clean -fd`, `robocopy /purge`, output redirection, PowerShell scripts) will not be caught. It is strongly recommended to run Pulsar in a sandboxed or virtualised environment when this tool is enabled.
