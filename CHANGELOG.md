@@ -1,8 +1,98 @@
 # pulsar-edit-mcp-server — Work Tracking
 
-> Last audited against live code: 2026-06-11 (v0.11.1)
+> Last audited against live code: 2026-06-12 (v0.14.0 — Phase 4 complete, all non-deferred tools migrated)
 
-## v0.11.1 — Fault log viewer, run-command pre-flight, logFailure context improvements (2026-06-11)
+## v0.14.0 — Tool Framework Phase 4f–4g complete: full migration (2026-06-12)
+
+**Change — Tool Framework Phase 4f (`lib/mcp-registration.js`):** 4 debugging-group tools migrated to `registerMcpTool({ category:'command', requiresEditor:false, group:'debugging' })`: `get-debug-log`, `get-failure-log`, `get-edit-stats`, `session-notes`. `loadNotes()` helper lifted out of old `{ const curTool }` scope to `if(g('debugging'))` outer scope (same pattern as `findCompiler()` in 4d). All `dbg(curTool,...)` calls replaced with string literals.
+
+**Change — Tool Framework Phase 4g (`lib/mcp-registration.js`):** 5 kernelC-group tools migrated to `registerMcpTool({ category:'command', group:'kernelC' })`: `checkpatch` (requiresEditor:false), `check-struct` (requiresEditor:false), `namingcheck` (requiresEditor:false), `check-function-docs` (requiresEditor:false), `insert-function-doc` (requiresEditor:true). `curStats = editStats[curTool] || ...` inline init patterns updated to use string literals. `bump(curTool, "hits")` in check-struct updated to `bump("check-struct", "hits")`.
+
+**Milestone — Tool Framework migration complete:** All non-deferred tools now on `registerMcpTool()`. Remaining SKIP/DEFER tools: `run-command`, `replace-across-files`, `get-repo-map`, 6× Ghidra tools (deferred indefinitely per refactor plan).
+
+## v0.13.0 — Tool Framework Phase 4a–4e: remaining tool migrations (2026-06-12)
+
+**Change — Tool Framework Phase 4a (`lib/mcp-registration.js`):** 6 fileOps file-management tools migrated to `registerMcpTool({ category:'command', requiresEditor:false })`: `create-file`, `move-file`, `copy-file`, `rename-file`, `create-folder`, `rename-folder`. Thin wrappers with no stats bumping — `console.log(CMD)` lines dropped (framework handles logging).
+
+**Change — Tool Framework Phase 4b (`lib/mcp-registration.js`):** 4 edit-group tools migrated: `delete-line` (deprecated wrapper), `get-selection`, `get-region`, `get-structural-anchors`. `get-region` and `get-structural-anchors` used `delete-line-range` + `insert` pattern due to deep nesting (8-space indent inside outer `{ const curTool }` block made `str_replace` fuzzyWhitespace unreliable on 90+ line handlers).
+
+**Change — Tool Framework Phase 4c (`lib/mcp-registration.js`):** 4 safety-group tools migrated to `registerMcpTool({ category:'command' })`: `diff-preview`, `checkpoint`, `restore-checkpoint` (`requiresEditor:true`), `list-checkpoints` (`requiresEditor:false`). No stats bumping — command category thin wrappers.
+
+**Change — Tool Framework Phase 4d (`lib/mcp-registration.js`):** 2 diagnostics-group tools migrated: `get-compiler-diagnostics`, `get-diagnostics`. `get-compiler-diagnostics` had three helper functions (`findCompiler`, `buildCmd`, `parseLine`) and two regexes (`gccRe`, `msvcRe`) nested inside the old `{ const curTool }` scope block — these were lifted out and dedented one level into the `if (g('diagnostics'))` block scope, where the handler can still close over them. `get-diagnostics` retains its direct `bump('get_linter_messages', 'hits')` calls — correct, as these are named stat keys not `ctx.commit()` paths. Both `requiresEditor:false`.
+
+**Change — Tool Framework Phase 4e (`lib/mcp-registration.js`):** 3 tools migrated: `highlight-range` (`group:'highlight'`, `requiresEditor:true`), `list-tools` (`group:'core'`, `requiresEditor:false`), `enable-group` (`group:'core'`, `requiresEditor:false`). `list-tools` and `enable-group` were always-on discovery tools with no `if (g(...))` guard — they register in sequence without a group gate and use `group:'core'` matching the tool catalogue.
+
+## v0.13.0 — Tool Framework Phase 3+4 complete: all search/nav tools migrated, legacy aliases removed (2026-06-12)
+
+**Change — Tool Framework Phase 3 (`lib/mcp-registration.js`):** All search and nav tools migrated from bare `server.registerTool()` to `registerMcpTool()`. Search tools migrated: `grep-file`, `grep-project`, `search-symbol`, `find-text`. Nav tools migrated: `get-document`, `get-line-count`, `get-filename`, `get-full-path`, `get-project-files`, `open-file`, `goto-line`, `list-open-files`, `get-active-editor-info`, `close-file`, `goto-focus`, `get-project-paths`, `add-project-path`, `undo`, `redo`, `read-file`, `save-file`, `save-all`, `get-file-summary`, `get-includes-and-defines`, `list-project-functions`, `read-lines`, `file-line-count`. Total `registerMcpTool()` call count: 38. `get-repo-map` deferred (complex handler). Ghidra tools left as-is (minimal boilerplate).
+
+**Change — Tool Framework Phase 4 cleanup (`lib/mcp-registration.js`):** All 7 legacy per-tool consecutive failure counter alias declarations removed: `strReplFailures`, `insertFailures`, `deleteFailures`, `deleteBlockFailures`, `replaceBlockFailures`, `sedFailures`, `patchFailures`. All usages replaced with `ctx.consec` directly (`ctx.consec.count++`, `counter: ctx.consec`, `ctx.consec.count = 0`). Return object keys standardised from `xxxFailures: alias.count` to `consecFailures: ctx.consec.count`. Counter ownership now fully consolidated in `tool-framework.js` `consecCounters` map.
+
+**Change — `lib/buffer-helpers.js` (v0.12.0 carry-forward):** `readFileOrBuffer` fallback now uses `atom.workspace.open(filePath, { activateItem: false })` instead of `fs.promises.readFile` — Pulsar's encoding-aware buffer is always used, fixing silent `grep-file` misses on files with non-ASCII content.
+
+## v0.12.0 — UTF-8 clean + grep always uses live buffer (2026-06-12)
+
+**Bug fixed — `mcp-registration.js` mojibake:** 194 `\uFFFD` replacement characters remained in inline comments throughout `mcp-registration.js` — all were em-dashes (`—`) that survived previous partial repairs. Replaced all 194 with U+2014 directly on disk via a one-line Node script. File is now fully clean UTF-8. All other `lib/*.js` files were already clean (0 `\uFFFD`).
+
+**Bug fixed — `readFileOrBuffer` encoding mismatch (`lib/buffer-helpers.js`):** When a file was not already open in Pulsar, `readFileOrBuffer` fell back to `fs.promises.readFile(path, "utf8")`. Node's UTF-8 decoder replaces invalid byte sequences with `\uFFFD`, so any file with residual cp1252 bytes on disk would cause `grep-file` queries containing Unicode chars (arrows, em-dashes) to silently return no matches even when the content was visually present. Fix: replaced the `fs.promises.readFile` fallback with `atom.workspace.open(filePath, { activateItem: false, searchAllPanes: true })` — Pulsar's own encoding detection is used, producing a buffer that exactly matches what an already-open editor returns. `activateItem: false` means the file opens silently without switching focus.
+
+
+## v0.11.9 — Tool Framework Phase 2 complete: all edit tools migrated (2026-06-12)
+
+**Change — `lib/tool-framework.js` + `lib/mcp-registration.js`:** All 8 main edit tools now registered via `registerMcpTool()` instead of bare `server.registerTool()`. Migrated in sessions 40–47: `str_replace`, `insert`, `delete-line-range`, `delete-block`, `replace-function-body`, `replace-block`, `sed`, `apply-patch`. Each handler receives a `ctx` object with `editor`, `buffer`, `allLines`, `text`, `ctx.consec` (consecutive failure counter), `ctx.fail()`, `ctx.commit()`, `ctx.dryRunReturn()`, and `ctx.snapshotOriginal()` — eliminating per-tool boilerplate for editor acquisition, stats bumping, and failure counter management.
+
+**Change — `apply-patch` group corrected:** `apply-patch` was incorrectly placed in the `fileOps` toggle group. Moved to `edit` group in both `mcp-registration.js` (`if (g('edit'))` guard) and `lib/tool-catalogue.js`. It is an edit tool — it modifies buffer content — and should be enabled/disabled with the other edit tools.
+
+**Removed from module scope:** Per-tool failure counter objects (`strReplFailures`, `insertFailures`, `deleteFailures`, `replaceBlockFailures`, `patchFailures`, `sedFailures`) no longer declared at module scope in `mcp-registration.js`. All are now managed internally by the framework's `consecCounters` map.
+
+## v0.11.8 — .mcp-ignore: periodic rescan via onDidChangePaths (2026-06-11)
+
+**Bug fixed:** `.mcp-ignore` rules only took effect if the ignore list was populated at server startup. If the user added rules to `.mcp-ignore` after startup, or switched to a different project root (File → Add/Remove Folder), the ignore state would not update.
+
+**Root cause:** `reloadMcpIgnore()` was called once on `require` in `mcp-ignore.js`. The `fs.watch` watcher was set up on the project root at that moment. If `atom.project.getPaths()` returned `[]` at require-time (before Pulsar fully activates), the watcher was attached to `process.cwd()` instead of the real project root, so changes to `.mcp-ignore` were never seen. Even when the project root was correct, switching roots left the old watcher in place.
+
+**Change — `lib/mcp-ignore.js`:** Added `initMcpIgnore()` export. Calls `reloadMcpIgnore()` immediately (with the now-correct project root), then subscribes to `atom.project.onDidChangePaths` so any future root change triggers a fresh reload. Returns a `Disposable` for cleanup.
+
+**Change — `lib/mcp-registration.js`:** Destructures `initMcpIgnore` from `./mcp-ignore`. Calls `packageDisposables.add(initMcpIgnore())` immediately after `packageDisposables` is created — at this point `mcp-registration.js` is loaded via `restartServer()` which is deferred to `onDidActivateInitialPackages`, so `atom.project` is fully ready.
+
+
+## v0.11.7 — .mcp-ignore: wire _checkIgnored into registerTool wrapper (2026-06-11)
+
+**Change — `lib/mcp-registration.js`:** `_checkIgnored()` was defined but never called. Added a `EDIT_TOOL_NAMES` Set (built once from `TOOL_CATALOGUE.filter(t => t.group === 'edit')`) inside `mcpRegistration()`. The `server.registerTool` wrapper now checks `EDIT_TOOL_NAMES.has(name)` and calls `_checkIgnored(atom.workspace.getActiveTextEditor())` before invoking the handler — a single guard covering all edit-group tools. Unused `reloadMcpIgnore` and `getMcpIgnoreInfo` imports renamed to `_reloadMcpIgnore` / `_getMcpIgnoreInfo` to satisfy ESLint no-unused-vars.
+
+**Complete `.mcp-ignore` coverage (three locations):**
+1. `buffer-helpers.js` `walkDir()` — filters ignored files/dirs from directory traversal (grep-project, get-repo-map, replace-across-files).
+2. `buffer-helpers.js` `readFileOrBuffer()` — throws on ignored paths for all read tools that call it.
+3. `mcp-registration.js` `server.registerTool` wrapper — blocks all edit-group tool handlers when the active editor's file is ignored.
+
+## v0.11.5 — run-command focus restore: await before resolve (2026-06-11)
+
+**Bug fixed:** `run-command` reported the tool result before the active tab restore had actually completed. `atom.workspace.open()` is async — calling it fire-and-forget then immediately calling `resolve()` meant the tab switch raced the tool return and lost. In practice the previously active tab appeared unchanged (still the default) rather than being visibly restored.
+
+**Change — `lib/mcp-registration.js`:** `resolve()` is now called inside `focusPromise.then()` instead of after it. `focusPromise` is either the `atom.workspace.open()` promise (with `.catch(()=>{})`) or `Promise.resolve()` when no active path was captured. This guarantees the tab has switched before the tool returns.
+
+## v0.11.6 — remove filePath from insert-function-doc (2026-06-11)
+
+**Change — `lib/mcp-registration.js`:** `insert-function-doc` no longer accepts a `filePath` parameter. All edit tools now require `open-file` first to set the active editor — passing a path to an edit tool was a false affordance that silently hit the wrong file when the target wasn't active. Description updated to say "Use open-file to switch to the target file before calling this tool." Handler simplified to always use `atom.workspace.getActiveTextEditor()`.
+
+ — run-command restores active editor focus (2026-06-11)
+
+**Change — `lib/mcp-registration.js`:** `run-command` pre-flight now captures the active editor path (`activeEditorPath`) alongside `openEditors`. After the post-execution reload loop completes, `atom.workspace.open(activeEditorPath, { activateItem: true, searchAllPanes: true })` is called (fire-and-forget, errors ignored) to restore the tab that had focus before the command ran. Prevents the active editor shifting to whichever reloaded file was processed last.
+
+## v0.11.3 — BUG-B fix: autoStripComment short-needle guard (2026-06-11)
+
+**Bug fixed:** `autoStripComment` could silently commit to the wrong line when stripping a trailing comment left a needle too short to be a reliable anchor inside the hint window (e.g. a single token or empty last line). The fuzzy trimmed-line search would then match the wrong occurrence and commit with a `/* CHECK: ... */` marker at the wrong location.
+
+**Change — `lib/mcp-registration.js`:** Added minimum-length guard before the `autoStripComment` fuzzy search. If `strippedLast` has fewer than 8 non-whitespace chars, or the full stripped needle fewer than 10, the rescue is skipped and falls through to normal failure reporting. Named constants `STRIP_MIN_LAST = 8` and `STRIP_MIN_TOTAL = 10` inline.
+
+## v0.11.2 — BUG-A fix: ambiguityCheck scope awareness (2026-06-11)
+
+**Bug fixed:** `fuzzyContent:true` combined with `inFunction` (or any non-`functionHint` scope hint) triggered a false ambiguity error because `ambiguityCheck` was scanning the full buffer and `noScopeHint` did not include `inFunction`, `inSymbol`, `lineContentHint`, `afterFunction`, `beforeFunction`, `afterSymbol`, `beforeSymbol`, `afterString`, `beforeString`, `afterLine`, or `beforeLine`.
+
+**Changes:**
+- `lib/tool-hints.js` — `ambiguityCheck` accepts optional `scopedText` parameter; when provided, occurrence counting runs on the scoped region only (with line numbers reported relative to the full buffer for LLM readability). JSDoc updated.
+- `lib/mcp-registration.js` — `ambiguityCheck` call: `noScopeHint` replaced with `_hasScope` flag that covers all 12 scoping hints + `occurrence > 1`. `scopedText` passed as `text.substring(searchStart, searchEnd)` when the region has been narrowed. `successNudge` call: `noHintsUsed` and `lineNumberHintOnly` likewise updated to cover the full hint set.
+
 
 **New tools:**
 - `get-failure-log` (debugging group) — query `failure-log.ndjson` directly from the LLM. Args: `tail` (default 20, max 200), `tool`, `reason`, `filePath` filters. Returns structured JSON. Complements `get-edit-stats` with per-failure detail. Added to `tool-catalogue.js`.
@@ -84,7 +174,7 @@
 | 6 | 🔍 MEDIUM | Capture fuzzy trigger detail in edit stats | When a fuzzy auto-retry fires (fuzzyWhitespace, fuzzyContent, autoPartialMatch), capture *what* caused it — the diffVsBuffer or a short "reason token" — so `get-edit-stats` can show "autoFuzzyWhitespace x3: trailing space on line N" rather than just a count. Helps distinguish real encoding mismatches from stale old_str. |
 | 7 | 🔤 LOW-MEDIUM | Case-insensitive fuzzy matching in str_replace | When str_replace noMatch, optionally retry with case-folded comparison. Use case: LLM sends wrong capitalisation (e.g. `Const` vs `const`). Would be a 5th auto-retry block after partialMatch. Need to assess false-positive risk — case matters in most languages. |
 | 8 | 🖼️ MEDIUM | Inline diff in chat panel | See design below. |
-| 9 | 🚫 MEDIUM | Pulsar ignore / `.mcp-ignore` | See design below. |
+| 9 | ✅ DONE | Pulsar ignore / `.mcp-ignore` | Implemented v0.11.7. `lib/mcp-ignore.js` + 3 integration points. |
 | 10 | 🔧 LOW | Named capture groups `$<name>` in `applyReplacement` | Low priority quality-of-life. |
 | 11 | 🧪 MEDIUM | Automated testing + script runner (Tier 1/2/3) | See design below. |
 | 12 | 💾 LOW | Disk-backed checkpoints | See design below. |
