@@ -1,2 +1,5 @@
 # Test ignore file
 test/fix-tests.js
+
+# Dependencies — not in git, not searchable
+node_modules/

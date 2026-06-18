@@ -8,7 +8,7 @@ Two tools provide the data that drove every design decision here:
 
 **`get-edit-stats`** — per-tool, per-failure-reason counters tracked across sessions in `edit-stats.json`. Queryable by the LLM mid-session so it can see its own failure patterns and adjust strategy. No other tool (Claude Code, Cline, Cursor) exposes this — they have aggregate post-hoc scrapers at best; the running agent never sees its own performance data.
 
-**`failure-log.ndjson`** — every `str_replace`/`insert`/`replace-block`/`replace-function-body` failure appended as a structured JSON record with `diffVsBuffer` (char-level diff of `old_str` vs actual buffer content), `bufferPreview`, `oldStrPreview`, and the full hint context. The log is grep-queryable and browsable via **Packages → MCP Server → Show Fault Log**. Every systematic failure class that appeared 3+ times with a recognisable pattern became a candidate for automatic rescue. The log converts anecdotal failure reports into measurable signals that justify engineering cost.
+**`session-faults.ndjson`** — every `str_replace`/`insert`/`replace-block`/`replace-function-body` failure appended as a structured JSON record with `diffVsBuffer` (char-level diff of `old_str` vs actual buffer content), `bufferPreview`, `oldStrPreview`, and the full hint context. The log is grep-queryable and browsable via **Packages → MCP Server → Show Fault Log**. Every systematic failure class that appeared 3+ times with a recognisable pattern became a candidate for automatic rescue. The log converts anecdotal failure reports into measurable signals that justify engineering cost.
 
 ## Comparison: what other tools do
 
@@ -36,7 +36,7 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **What happens:** The LLM generates `old_str` containing Unicode substitutions — smart quotes instead of straight quotes, em dash instead of hyphen, non-breaking space, zero-width spaces, arrow characters. Visually identical to the buffer but different at the byte level. The whitespace diff diagnostic doesn't fire because this isn't an indentation issue.
 
-**How we know it's common:** The `failure-log.ndjson` evidence base revealed this directly. A recurring cluster of entries showed `old_str` containing `->` (ASCII) while the buffer had `→` (U+2192). Another cluster showed trailing `/* verified */` comments present in `old_str` but absent from the buffer. These patterns were invisible before the log existed — every failure looked like a generic noMatch.
+**How we know it's common:** The `session-faults.ndjson` evidence base revealed this directly. A recurring cluster of entries showed `old_str` containing `->` (ASCII) while the buffer had `→` (U+2192). Another cluster showed trailing `/* verified */` comments present in `old_str` but absent from the buffer. These patterns were invisible before the log existed — every failure looked like a generic noMatch.
 
 **The character classes affected:**
 
@@ -94,6 +94,8 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 *`successNudge` lineHint upgrade suggestion* — when `str_replace` commits using only `lineNumberHint` on a file >= 100 lines, the success response appends a specific suggestion: `"Next time use afterHint:\"<content>\" instead — it's content-stable and won't drift."` The anchor string is extracted from the matched line at commit time — immediately usable, not generic advice. Trains the pattern within the session before the next failure.
 
 *`lineNumberHint` is a search-narrowing hint, not a position anchor* — it narrows the search window to ±25 rows around the specified line. If `old_str` is found in that window, it matches normally. It does not bypass content matching. The old `lineNumberHintFallback` positional overwrite was removed in v0.10.26 after producing 218 silent wrong-region overwrites in lifetime stats.
+
+*`afterLine` vs `afterString` reliability — measured* — lifetime hint success rates confirm what theory predicts: `afterString` is 100% (56/56) because content is stable; `afterLine` is 75% (12/16) because line numbers drift after insertions above the target. The 4 `afterLine` failures were all `afterNotFound` — the hint pointed at a region that had shifted. Rule: use `afterLine` only when paired with a second hint (e.g. `inFunction` + `afterLine`). Never use `afterLine` as the sole hint on a file that is being actively edited across multiple turns.
 
 ---
 
@@ -213,17 +215,66 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 ---
 
+## Failure Mode 14 — Wrong file active (contentFaults)
+
+**What happens:** The LLM issues a `str_replace` while a different file is the active editor. The edit targets `mcp-registration.js` but the active tab is `tool-catalogue.js`. The search runs on the wrong buffer, finds nothing, and returns `noMatch` — or worse, if the pattern happens to exist in both files, it commits to the wrong one silently.
+
+**How we know it's common:** Lifetime stats introduced a `faultBuckets` field to classify `str_replace` faults: `contentFaults` (old_str genuinely absent from the buffer — wrong file or stale content) vs `hintFaults` (hint resolution failed — drift, typo in anchor). Analysing the `failure-log.ndjson` cluster showed the `contentFaults` group was dominated by sessions where the LLM had switched between files without tracking which was active. The pattern was recognisable: correct `old_str` content, zero whitespace or encoding issues, but wrong file path in the blame.
+
+**Solutions:**
+
+*`filePath` parameter on all edit tools* — since v0.14.x every edit tool (`str_replace`, `insert`, `delete-line-range`, `replace-function-body`, `replace-block`, `apply-patch`, `sed`, `replace-document`) accepts `filePath`. The framework opens the file in a background tab if it's not already open. The active tab is never used for writes. Passing `filePath` on every edit call eliminates the entire `contentFault` failure class — the edit can never land on the wrong buffer regardless of what the user or prior tool calls have made active.
+
+*Rule: always pass `filePath` on edit calls to source files.* Read tools (get-region, read-lines, grep-file) can omit it when the intent is to operate on the active editor; edit tools should not rely on that assumption.
+
+*`show-last-edited-file` command* — **Packages → MCP Server → Show Last Edited File** reveals which file was actually committed to most recently. Useful when the active tab is uncertain.
+
+*Focus toggle* — `atom.config` key `pulsar-edit-mcp-server.focusEditedFile` (default `true`). When true, committing via `filePath` to a file already open in a tab brings that tab to focus. Toggle via **Packages → MCP Server → Toggle Focus Edited File**.
+
+---
+
+## Failure Mode 15 — Old_str found outside the active scope
+
+**What happens:** The LLM uses `inFunction` or `betweenHint` to scope a `str_replace` to a region, but `old_str` doesn't appear inside that region — it exists in a different function or section of the file. The tool returns `noMatch` from the scoped search. Without more information the LLM might widen or remove the scope (making the wrong edit in the wrong place) or retry blind.
+
+**How we know it's common:** `foundOutsideScope` was added as a distinct fail counter in `edit-stats.js` after the `scanForOldStr` feature was built to address this. Before the counter existed, these failures were indistinguishable from genuine content mismatches in stats.
+
+**Solution:**
+
+*`scanForOldStr`* — when `str_replace` returns `noMatch` with a scope hint active (`inFunction` or `betweenHint`), the full buffer is scanned for `old_str`. If hits are found outside the scope, the failure response includes a 🚨 **FOUND OUTSIDE SCOPE** block listing up to 5 hit locations with line numbers and nearest function context. This immediately tells the LLM: "the content exists, but not where you specified — here's where it actually is." The counter `fails.foundOutsideScope` is bumped in stats. Correct action: either update `inFunction` to the function where the hit was found, or reconsider whether the edit target is correct.
+
+---
+
+## Failure Mode 16 — Hint failures invisible in the fault log
+
+**What happens:** When a hint resolution fails — `afterString` not found, `inFunction` not found or ambiguous, `betweenHint` start/end not found — the tool returns an error and bumps the relevant stats counter (`fails.afterNotFound`, `fails.outOfScope`). But the early-return path never called `logFailure`, so nothing was written to `session-faults.ndjson`. The fault log only ever received content failures (`noMatch`, `whitespace`, `partialMatch`). The 28+ `afterNotFound` hint faults visible in lifetime stats had zero corresponding fault log entries — the actual hint strings, file paths, and `old_str` context were completely uninspectable.
+
+**How we know it's common:** Reviewing the fault log after a session with known `afterNotFound` faults showed only `noMatch` entries. Cross-referencing with `get-edit-stats` confirmed the count discrepancy: 28 `afterNotFound` faults in stats, 0 hint-related entries in the log. The gap was structural — the early-return pattern for all hint failures bypassed `logFailure`.
+
+**Solution:**
+
+*`logHintFailure()` helper (v0.15.1)* — module-level function wrapping `logFailure` with a structured `reason` field: `"hintFault:<hintName>:<variant>"`. Variant is one of `notFound`, `ambiguous`, or `needsTreeSitter`. Also records `hintValue` (the failing anchor string, truncated to 80 chars) and `oldStrPreview`. Wired at all 12 hint failure early-return sites in `str_replace` and all 8 in `insert`. The `sectionHint`/`preprocBlock` path in `insert` already called `logFailure` and was left untouched.
+
+The fault log `reason` field now takes one of two forms:
+- **Content failures:** `noMatch` / `whitespace` / `partialMatch` / `encoding` — hint resolved, `old_str` didn't match
+- **Hint failures:** `hintFault:<hintName>:<variant>` — anchor resolution failed before the search even ran
+
+Both are queryable via `get-failure-log` with `reason` filter (e.g. `reason:"hintFault"` shows only anchor failures). The fault log viewer's Reason column displays both classes directly.
+
+---
+
 ## The auto-retry pipeline
 
-The three most common `str_replace` failure causes now fire automatically before returning a failure, requiring no explicit flags. Each was opt-in originally; after lifetime stats showed them accounting for the vast majority of `noMatch` failures, automatic rescue became the safer choice.
+The most common `str_replace` failure causes now fire automatically before returning a failure, requiring no explicit flags. Each was opt-in originally; after lifetime stats showed them accounting for the vast majority of `noMatch` failures, automatic rescue became the safer choice.
 
 ```
 P1  exact match           — indexOf in search window
 P2  fuzzyWhitespace       — trim-per-line (auto if not explicit)
 P3  fuzzyContent          — Unicode→ASCII normalisation (auto if not explicit)
 P4  autoStripComment      — strip trailing comment from old_str last line (auto)
+P4a autoPartialMatch      — when old_str is a prefix of a longer buffer line, commit the partial match (auto; tagged [autoPartialMatch])
 P5  regex:true            — treat old_str as /gm RegExp [explicit only]
-→ FAIL: diffVsBuffer char diff + Levenshtein similarity% + smartSuggestion + failure-log.ndjson
+→ FAIL: diffVsBuffer char diff + Levenshtein similarity% + smartSuggestion + scanForOldStr scope check + session-faults.ndjson
 ```
 
 Tags in the response (`[autoFuzzyWhitespace]`, `[autoFuzzyContent]`, `[autoStripComment]`) show which rescue path fired so the LLM can supply the flag explicitly next time.
@@ -250,6 +301,10 @@ Tags in the response (`[autoFuzzyWhitespace]`, `[autoFuzzyContent]`, `[autoStrip
 
 **Lifetime persistence.** `get-edit-stats({ reset: true })` flushes session counters into `edit-stats.json`, increments session count, and zeroes session counters. The lifetime block accumulates across all sessions and survives server restarts.
 
-**Failure log viewer.** **Packages → MCP Server → Show Fault Log** opens an interactive modal: newest-first table, live filter by tool/reason/file, click any row for a detail view with `bufferPreview` (green), `diffVsBuffer` (red), `oldStrPreview` (amber) rendered as coloured code blocks.
+**Failure log viewer.** **Packages → MCP Server → Show Fault Log** opens an interactive modal: newest-first table, live filter by tool/reason/file, click any row for a detail view with `bufferPreview` (green), `diffVsBuffer` (red), `oldStrPreview` (amber) rendered as coloured code blocks. The Reason column now distinguishes two failure classes: content failures (`noMatch`, `whitespace`, `partialMatch`) and hint failures (`hintFault:afterString:notFound`, `hintFault:inFunction:ambiguous`, etc.) — previously all hint failures were invisible in the log; they only appeared as raw counters in `get-edit-stats`.
+
+**Hint performance tracking.** `get-edit-stats` now reports `hintsSucceeded` and `hintsFailed` per hint name, plus `hintSuccessRate` (only for hints with at least one use). This surfaces the exact pattern confirmed by lifetime data: `afterString` 100%, `inFunction` 100%, `afterLine` 75%. `faultBuckets` splits faults into `contentFaults` (old_str absent — wrong file or stale content) and `hintFaults` (hint resolution failed — drift, bad anchor). `fuzzyTriggerReasons` tracks why auto-rescue fired: `needsWhitespace`, `needsContent`, `needsComment`, `partial`. Together these let the LLM diagnose a fault class in one `get-edit-stats` call rather than reading the full failure log.
+
+**Per-session history.** `get-edit-stats` returns `recentSessions` — the last 5 session summaries from `session-history.ndjson`, each with timestamp, edit count, hit rate, and fault count. Trend visible without reading the full lifetime block.
 
 **Style stats isolated from edit stats.** `checkpatchRuns` and `checkpatchViolations` are separate fields from `editsChecked` and `totalViolations`. A `checkpatch` run never inflates inline violation counts. If `checkpatch` violations are consistently higher than inline violations, the file was already dirty when the session started.

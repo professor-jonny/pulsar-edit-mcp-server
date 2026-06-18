@@ -30,18 +30,18 @@ Before committing any edit, `str_replace`, `replace-block`, `replace-function-bo
 ### 🎯 Smart failure suggestions
 When `str_replace` fails to match, the response immediately analyses *why*: whitespace and indentation differences are reported line-by-line, how many consecutive lines matched before diverging is counted, and the closest area of the file is found via fuzzy word-scoring. The suggestion engine fires **on failure #1** — if `old_str` looks like a whole function it suggests `replace-function-body`; if it looks like a brace block it suggests `replace-block`; on a large file with no hints it adds urgency. Escalates at failure #2 with tool-switch recommendations. On a *successful* edit with no hints on a file >300 lines, a nudge appended tells you which hints to use next time — closing the loop before problems start.
 
-For multi-line `old_str` failures a **Levenshtein similarity score** is also returned: `📊 Similarity: 71% — likely whitespace drift, try fuzzyWhitespace:true`. Anchor resolution failures (`afterHint`/`betweenHint` not found) show the nearest symbol name and its similarity percentage so typos in hint strings are caught immediately.
+For multi-line `old_str` failures a **Levenshtein similarity score** is also returned: `📊 Similarity: 71% — likely whitespace drift, try fuzzyWhitespace:true`. Anchor resolution failures (`afterString`/`betweenHint` not found) show the nearest symbol name and its similarity percentage so typos in hint strings are caught immediately.
 
 ### 📐 Content-anchored editing — immune to line number drift
 All edit tools support scope hints that anchor by *content* rather than line number:
-- `functionHint` — scopes the search to inside a named function body
-- `afterHint` — starts the search after a unique anchor string
+- `inFunction` — scopes the search to inside a named function body
+- `afterString` — starts the search after a unique anchor string
 - `betweenHint` — restricts the search to between two anchor strings (switch cases, struct blocks, `#ifdef` regions)
 - `occurrence:N` — targets the Nth match when a pattern repeats
 - `fuzzyWhitespace:true` — matches ignoring indentation differences, commits using the buffer's actual whitespace — eliminates the most common retry loop
 
 ### 🌳 Tree-sitter powered hint resolution — semantically correct anchors
-All hint resolution (`functionHint`, `afterHint`, `betweenHint`, `functionEnd`) is backed by Pulsar's tree-sitter parser for open files. This means `afterHint:"myFn"` resolves to the **end of that function's closing brace** — not just the first character occurrence of the string. `betweenHint:{start:"fn_a", end:"fn_b"}` spans from the closing brace of `fn_a` to the closing brace of `fn_b`. Ambiguous anchors (same function name in multiple places) return an error with line numbers rather than silently picking the wrong one. Regex fallback covers closed files and edge cases. The same symbol index powers `get-repo-map`, `list-project-functions`, `replace-function-body`, and all structural anchor tools.
+All hint resolution (`inFunction`, `afterString`, `betweenHint`, `functionEnd`) is backed by Pulsar's tree-sitter parser for open files. This means `afterString:"myFn"` resolves to the **end of that function's closing brace** — not just the first character occurrence of the string. `betweenHint:{start:"fn_a", end:"fn_b"}` spans from the closing brace of `fn_a` to the closing brace of `fn_b`. Ambiguous anchors (same function name in multiple places) return an error with line numbers rather than silently picking the wrong one. Regex fallback covers closed files and edge cases. The same symbol index powers `get-repo-map`, `list-project-functions`, `replace-function-body`, and all structural anchor tools.
 
 ### 📊 Per-tool edit stats — know exactly what's failing and why
 `get-edit-stats` tracks hits, faults, and misses **per tool** across the session and lifetime. Failure reasons are classified (`whitespace`, `partialMatch`, `ambiguous`, `outOfScope`) so you see patterns, not just counts. Hint usage is tracked separately so you can see whether the LLM is actually using the tools correctly. A live stats panel in Pulsar (**Packages → MCP Server → Show Edit Stats...**) shows the same data visually. No other coding assistant exposes this level of instrumentation.
@@ -89,38 +89,46 @@ The headline tells you exactly where the edit landed and what matching mode was 
 
 Delta-only means pre-existing problems in the file are silently ignored — only damage introduced by *this edit* is reported. Multiple issues in one edit are pipe-separated on a single line. The check is always-on and zero-configuration.
 
-### 🔬 Failure capture — char-level diagnostics on `noMatch`
+### 🔬 Failure capture — char-level diagnostics on every failure
 
-When `str_replace` fails to match, a `🔬 DIFF` block in the response shows the char-level diff between your `old_str` and the actual buffer content at the `lineNumberHint` position — the exact byte where the strings diverged, including invisible characters like smart quotes vs straight quotes, NBSP, or zero-width spaces. Every failure is also logged to `failure-log.ndjson` in the package root (one JSON line per failure, grep-queryable) with `diffVsBuffer`, `oldStrPreview`, and the full hint context.
+When `str_replace` fails to match, a `🔬 DIFF` block in the response shows the char-level diff between your `old_str` and the actual buffer content at the `afterLine` position — the exact byte where the strings diverged, including invisible characters like smart quotes vs straight quotes, NBSP, or zero-width spaces. Every failure is also logged to `session-faults.ndjson` with `diffVsBuffer`, `oldStrPreview`, and full hint context.
+
+Hint resolution failures are also logged — not just content mismatches. When `afterString`, `inFunction`, `betweenHint`, `afterFunction`, `afterSymbol`, or any other hint fails to resolve, the fault log records the failure with a structured `reason` field: `hintFault:<hintName>:<variant>` (e.g. `hintFault:afterString:notFound`, `hintFault:inFunction:ambiguous`). This means the fault log viewer now clearly distinguishes two failure classes:
+
+- **Content failures** (`noMatch`, `whitespace`, `partialMatch`) — the hint resolved fine but `old_str` didn't match at that location
+- **Hint failures** (`hintFault:*`) — the anchor itself wasn't found or was ambiguous, so the search never started
+
+Both are queryable via `get-failure-log` with `reason` filter. The Fault Log panel in Pulsar shows both in the same list with the Reason column populated in full.
 
 ### 🌐 Unicode robustness — three matching modes for encoding problems
 
 LLMs frequently generate `old_str` containing Unicode variants that differ from what the buffer holds (smart quotes, em-dashes, NBSP, zero-width chars). Three modes address this without requiring a re-read:
 
 - **`fuzzyContent:true`** — normalises both `old_str` and the buffer to ASCII-equivalent before matching (smart quotes → straight, em-dash → hyphen, NBSP → space, surrogate pairs stripped). The replacement is committed against the original buffer content — encoding is preserved.
-- **`regex:true`** — treats `old_str` as a JS regex. Use `.` to wildcard a single problematic char, `.*` for a span. Supports `occurrence:N` and `lineNumberHint` scoping.
+- **`regex:true`** — treats `old_str` as a JS regex. Use `.` to wildcard a single problematic char, `.*` for a span. Supports `occurrence:N` and `afterLine` scoping.
 - **`fuzzyWhitespace:true`** — existing mode, handles indentation-only mismatches.
 
 All three can be layered. `get-repo-map` now appends a `[unicode]` flag to files containing non-ASCII characters — a heads-up to use `fuzzyContent` or `regex:true` before the first edit fails.
 
-### 📦 Shared library architecture — tools as declarative configs (in progress)
+### 📦 Shared library architecture — tools as declarative configs
 
-`mcp-registration.js` has been refactored from a ~8007-line monolith into a set of focused shared libraries. The main file is now **~6693 lines** (−16%). Libraries extracted so far:
+`mcp-registration.js` has been refactored from a monolith into a set of focused shared libraries. The main file is now **~6650 lines** (down from ~8000). The `lib/tool-framework.js` layer is complete — each tool is a declarative config object and all cross-cutting concerns (stats, dryRun, consecutive failure counters, style/lint/struct checking, buffer acquisition by `filePath`) are handled centrally.
 
+Libraries extracted:
+
+- **`lib/tool-framework.js`** — `makeRegisterMcpTool()` wrapper. Handles buffer acquisition by `filePath` (find open tab or `bufferForPath` for closed files — no tab created, full undo/save support), `ctx.fail()`, `ctx.commit()` (auto-save, gutter decorations, focus toggle, `onCommit` callback), `ctx.dryRunReturn()`, consecutive failure counters
 - **`lib/edit-stats.js`** — session/lifetime stats, `bump()`, `bumpStyle()`, `flushLifetimeStats()`, `syncToLifetime()`, `summarise()`, `buildReport()`, `buildStyleReport()`, process exit hooks
 - **`lib/tool-hints.js`** — `anchorError()`, `smartSuggestion()`, `successNudge()`, `ambiguityCheck()`, consecutive failure counter objects
-- **`lib/buffer-helpers.js`** — `walkDir()`, `resolveStructuralAnchor()`, `findAnchor()`, `findFunctionInBuffer()`, `readFileOrBuffer()`, `retargetEditor()`
+- **`lib/buffer-helpers.js`** — `walkDir()`, `resolveStructuralAnchor()`, `findAnchor()`, `findFunctionInBuffer()`, `readTextFromFile()` (open-tab buffer or `bufferForPath` — no raw disk reads, BOM-safe)
 - **`lib/lint-helpers.js`** — `maybeLintSuffix()`, `lintSnapshot()`
 - **`lib/tool-catalogue.js`** — `TOOL_CATALOGUE` array, `TOGGLEABLE_GROUPS` array
-- **`lib/schema.js`** — `ANCHOR_SCHEMA`, `STRUCTURAL_ANCHOR_SCHEMA` Zod schemas
+- **`lib/schema.js`** — `ANCHOR_SCHEMA` (includes `filePath`, all hint params), `STRUCTURAL_ANCHOR_SCHEMA` Zod schemas
 - **`lib/style-checker.js`** — kernel C style rules, `applyStyleCheck()`, `isKernelFile()`
 - **`lib/naming-checker.js`** — `checkNaming()`, `checkFunctionDocs()`, `buildDocSkeleton()`
 - **`lib/tree-sitter-symbols.js`** — `getSymbols()`, `resolveAnchor()`, `findFunction()`, `braceEndRow()`
 - **`lib/edit-response.js`** — `buildEditResponse()`, `preEditSnapshot()`, `postEditDelta()`
 - **`lib/struct-check.js`** — `snapshot()`, `delta()`
 - **`lib/string-utils.js`** — pure utilities: `escapeRegex`, `applyReplacement`, `globToRegex`, `levenshteinDistance`, `calculateSimilarity`
-
-The end goal is `lib/tool-framework.js` — a `registerMcpTool()` wrapper where each tool is a declarative config object and all cross-cutting concerns (stats, dryRun, consecutive failure counters, style/lint/struct checking) are handled centrally.
 
 
 <img src="https://github.com/user-attachments/assets/52c74f89-d76f-4faa-9265-009bdc78c32c" width="700" />
@@ -167,7 +175,7 @@ A **`MCP:On`** tile appears in the bottom-left status bar when the server is run
 | OpenAI API Endpoint | `https://api.openai.com` | Base URL for the built-in chat (everything before `/v1/chat/completions`). Requires restart. |
 | API Key | _(empty)_ | API key for the built-in chat |
 | Auto-Start MCP Server | `false` | Start the server automatically when Pulsar opens |
-| Show Chat Panel | `true` | Open the built-in chat panel on launch |
+| Focus Edited File | `true` | After each successful LLM edit, switch focus to the edited file's tab. Disable to keep your current tab while edits happen in background. Only affects already-open tabs — closed files are always edited silently without opening a tab. Toggle via **Packages → MCP Server → Toggle Focus Edited File** |
 | Max Tokens | `4096` | Maximum tokens for built-in chat LLM responses |
 | Tool Groups | all enabled | Enable/disable individual tool groups to control token usage |
 
@@ -213,12 +221,12 @@ Always loaded. Cannot be disabled.
 
 | Tool | Description |
 |---|---|
-| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. **Always use a hint on files >100 lines.** Decision ladder: (1) know the function name? → `functionHint` — scopes to that function body, safest for JS/C; (2) unique string just before the edit? → `afterHint`; (3) inside a block (switch/struct/#ifdef)? → `betweenHint:{start,end}`; (4) have a line number from grep? → `lineNumberHint`; (5) same pattern N times? → `occurrence:N`. `fuzzyWhitespace:true` when indentation mismatches cause failures. `fuzzyContent:true` for Unicode mismatches (smart quotes, em-dashes, NBSP, zero-width chars). `regex:true` to treat `old_str` as a JS regex — use `.` to wildcard a single problem char. `dryRun:true` to preview multi-line matches before committing |
+| `str_replace` | Replace the first occurrence of `old_str` with `new_str`. Pass `filePath` to target any file without switching tabs. **Always use a hint on files >100 lines.** Decision ladder: (1) know the function name? → `inFunction` — scopes to that function body, safest for JS/C; (2) unique string just before the edit? → `afterString`; (3) inside a block (switch/struct/#ifdef)? → `betweenHint:{start,end}`; (4) have a line number from grep? → `afterLine`; (5) same pattern N times? → `occurrence:N`. `fuzzyWhitespace:true` when indentation mismatches cause failures. `fuzzyContent:true` for Unicode mismatches. `regex:true` to treat `old_str` as a JS regex. `dryRun:true` to preview before committing |
 | `replace-all` | Replace ALL occurrences of a string or regex in the active editor. Supports `dryRun` to preview match count and locations before writing |
 | `replace-document` | Replace the entire editor contents |
 | `replace-function-body` | Atomically replace a named function's full signature and body in one operation — avoids line-number shifting. Supports `dryRun` |
-| `insert` | Insert one or more lines. Use `endOfFile:true` to append at end of file (simplest). Use `afterContent`/`beforeContent` (content-anchored, immune to line drift) for mid-file inserts. Supports `functionEnd`, `functionHint`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
-| `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `functionHint`, `betweenHint`, `afterHint`, `lineNumberHint`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
+| `insert` | Insert one or more lines. Use `endOfFile:true` to append at end of file (simplest). Use `afterContent`/`beforeContent` (content-anchored, immune to line drift) for mid-file inserts. Supports `functionEnd`, `inFunction`, `occurrence:N`, and `dryRun`. **Warning:** line numbers shift after every insert |
+| `delete-line-range` | Delete a range of lines (inclusive). Supports hint-based resolution: `inFunction`, `betweenHint`, `afterString`, `afterLine`, `occurrence:N`. Supports `dryRun`. **Warning:** line numbers shift after every delete |
 | `delete-block` | Delete lines between two content anchor strings (inclusive) — content-stable equivalent of `delete-line-range`. No line numbers needed |
 | `replace-block` | Brace-matched block replace anchored by any content string — generalised `replace-function-body` for non-function blocks (loops, conditionals, structs). Supports `dryRun` |
 | `get-region` | Return lines between two content anchor strings — content-stable equivalent of `read-lines`. No line numbers needed. Supports `occurrence:N` to target the Nth match of `startContent`. Tracks hintsUsed in stats |
@@ -232,7 +240,7 @@ Always loaded. Cannot be disabled.
 | Tool | Description |
 |---|---|
 | `read-file` | Read any project file with 1-based line numbers. Reads from the live buffer if the file is open in Pulsar, otherwise from disk |
-| `read-lines` | Read lines from any file. Supports hint-based resolution: `functionHint` (extract a named function body), `afterHint` (lines after an anchor string), `betweenHint` (lines between two anchors), `centerLine`+`radius` (window around a line), `lineNumberHint` (alias for centerLine). `startLine`/`endLine` still work when exact line numbers are known. Buffer-first when the file is open in Pulsar |
+| `read-lines` | Read lines from any file. Supports hint-based resolution: `inFunction` (extract a named function body), `afterString` (lines after an anchor string), `betweenHint` (lines between two anchors), `centerLine`+`radius` (window around a line), `afterLine` (alias for centerLine). `startLine`/`endLine` still work when exact line numbers are known. Buffer-first when the file is open in Pulsar |
 | `create-file` | Create a new file and open it in the editor |
 | `move-file` | Move or rename a file. Open tab is retargeted in-place via `buffer.setPath()` — undo history preserved |
 | `copy-file` | Copy a file to a new path and open the copy in a new tab. If the source is open with unsaved edits, the copy reflects the live buffer content |
@@ -296,7 +304,7 @@ Always loaded. Cannot be disabled.
 | Tool | Description |
 |---|---|
 | `get-debug-log` | Return recent MCP tool call log entries. Supports `tail` (default 20, max 100), `filter` by keyword, and `clear` to wipe the buffer |
-| `get-failure-log` | Query `failure-log.ndjson` — the structured failure capture log written on every `str_replace`/`insert`/`replace-block`/`replace-function-body` noMatch. Supports `tail` (default 20, max 200), `tool`, `reason`, and `filePath` filters. Each entry includes `diffVsBuffer`, `bufferPreview`, `oldStrPreview`, and full hint context. Use this after a noMatch to understand exactly what the buffer contained at the failure site |
+| `get-failure-log` | Query `session-faults.ndjson` — the structured failure capture log written on every `str_replace`/`insert`/`replace-block`/`replace-function-body` failure. Supports `tail` (default 20, max 200), `tool`, `reason`, and `filePath` filters. Content failures (`noMatch`, `whitespace`, `partialMatch`) include `diffVsBuffer`, `bufferPreview`, and `oldStrPreview`. Hint failures (`hintFault:<hintName>:<variant>`) include `hintValue` and `oldStrPreview`. Use the `reason` filter to separate the two classes — e.g. `reason:"hintFault"` shows only anchor resolution failures. |
 | `get-diagnostics` | Return live linter diagnostics from linter-bundle (errors, warnings, info). **Live on buffer — no save needed.** `scope: 'file'` (default) returns messages for the active editor; `scope: 'project'` returns all messages across open files. Works for any language with a linter provider installed (JS, TS, C, C++, and others). Returns `[]` gracefully if linter-bundle is not active |
 | `get-edit-stats` | Return per-tool edit statistics for the current session and lifetime totals (persisted in `edit-stats.json`). Covers all edit tools and all search tools (`grep-file`, `grep-project`, `search-symbol`, `find-text`, `replace-across-files`). SESSION: counters since last restart. LIFETIME: cumulative across all sessions. Tracks hits, fail reasons, hint usage (including `occurrence`/`contextLines` for search tools), dry-run count, fuzzy whitespace commits, and average `old_str` length. Pass `reset:true` to flush session into lifetime and zero session counters |
 | `session-notes` | Persistent cross-session notes written by the LLM. `action:write` appends a note (what failed, what fix worked, lessons learned). `action:read` retrieves past notes at session start to restore context. `action:clear` wipes all notes. Notes survive server restarts and are stored in `session-notes.json` in the package root |
@@ -370,11 +378,11 @@ Every edit tool has per-failure-reason counters. When consecutive failures clust
 
 ### tool description decision ladders
 
-All tool descriptions have been rewritten to lead with **decision triggers** — concrete "when to use this" rules rather than feature lists. Each hint (`functionHint`, `afterHint`, `betweenHint`, `lineNumberHint`, `occurrence`) now has an explicit trigger condition so the LLM reaches for the right hint at the right moment, not just after a failure.
+All tool descriptions have been rewritten to lead with **decision triggers** — concrete "when to use this" rules rather than feature lists. Each hint (`inFunction`, `afterString`, `betweenHint`, `afterLine`, `occurrence`) now has an explicit trigger condition so the LLM reaches for the right hint at the right moment, not just after a failure.
 
 ### smart failure responses
 - If an edit fails to find a match, `str_replace` analyses the near-miss: it reports whitespace/indentation differences line by line, counts how many consecutive lines of a multi-line block matched before diverging, and pinpoints the closest area of the file via fuzzy word-scoring
-- The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency. `delete-block` failures have dedicated guidance listing `startContent/endContent`, `sectionHint`, `preprocBlock`, `functionHint`, and `get-structural-anchors`
+- The smart suggestion engine fires **on the first failure** — not after 3. It detects: no hints used → lists specific hints with examples; `old_str` looks like a whole function → suggests `replace-function-body`; `old_str` looks like a brace block → suggests `replace-block`; large file (>500 lines) + no hints → adds file-size urgency. `delete-block` failures have dedicated guidance listing `startContent/endContent`, `sectionHint`, `preprocBlock`, `inFunction`, and `get-structural-anchors`
 - After 2 consecutive failures, the response escalates with tool-switch suggestions
 - On a **successful** `str_replace` with no hints on a file >300 lines, a nudge is appended telling you which hints to use next time — closing the loop before problems start
 
@@ -418,13 +426,25 @@ When a tool fails partway through, it returns structured context so the LLM can 
 - **`replace-across-files` — skipped files**: files that error on read or write are now returned in a `skipped` array with the reason rather than being silently dropped
 
 ### content-anchored editing (`str_replace`, `insert`, `delete-block`, `get-region`)
-- `functionHint` scopes `str_replace` to within a named function body — immune to line-number drift, preferred for JS/C edits
-- `afterHint` starts the search after the first occurrence of a content string — content-stable equivalent of `lineNumberHint`
+- `inFunction` scopes `str_replace` to within a named function body — immune to line-number drift, preferred for JS/C edits
+- `afterString` starts the search after the first occurrence of a content string — content-stable, doesn't drift with line number changes
 - `betweenHint: { start, end }` restricts the search to between two anchor strings — useful for switch cases, struct blocks, `#ifdef` regions
+- `afterLine` / `beforeLine` — directional window hints when you have a known line number from grep; prefer `afterString` when the content is stable
 - `occurrence:N` replaces the Nth match instead of the first — fixes duplicate-pattern confusion without widening `old_str`
 - `fuzzyWhitespace:true` matches ignoring per-line indentation differences and commits using the buffer's actual whitespace — eliminates the most common retry loop
 - `afterContent` / `beforeContent` on `insert` anchor the insertion point by content string rather than line number — immune to drift
 - `delete-block` and `get-region` use start/end content strings instead of line numbers throughout
+
+
+
+### filePath routing — edits never touch your active tab
+
+All edit tools accept an optional `filePath` parameter. When provided, the framework resolves the buffer by path rather than using whatever tab happens to be active:
+
+- **File already open in a tab** — uses its live buffer directly. No tab switch. If the `Focus Edited File` setting is enabled, the tab is brought to front after a successful commit so you can see the result. Toggle this per-session via **Packages → MCP Server → Toggle Focus Edited File**.
+- **File not open** — uses `atom.project.bufferForPath()`. No tab is created, no focus changes. The buffer has full undo history and `save()` support — identical to an open file except it has no pane item and no gutter decorations.
+
+This means you can keep reading one file while the LLM edits another in the background. Use **Packages → MCP Server → Show Last Edited File** at any time to jump to the last file that was committed.
 
 ### Buffer and history
 
@@ -465,7 +485,7 @@ Check the counters are at zero. If they are not, a previous session was interrup
 #### While you are working
 
 - If `str_replace` fails twice in a row, call `get-edit-stats()` before trying again. The failure class (`whitespace`, `partialMatch`, `outOfScope`, `ambiguous`) tells you what to fix — do not retry blindly with the same call.
-- Use `afterHint` or `functionHint` on any `str_replace` where the pattern could appear more than once in the file.
+- Use `inFunction` or `afterString` on any `str_replace` where the pattern could appear more than once in the file. Use `afterLine` only when content anchors aren't available — it drifts after inserts/deletes.
 - If whitespace failures are showing up in stats, switch to `fuzzyWhitespace: true` for the rest of the session on that file.
 - Pass `lint: true` on any edit where you want immediate feedback on errors introduced by the change — eliminates a separate `get-diagnostics` call.
 

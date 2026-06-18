@@ -1,6 +1,128 @@
 # pulsar-edit-mcp-server — Work Tracking
 
-> Last audited against live code: 2026-06-12 (v0.14.0 — Phase 4 complete, all non-deferred tools migrated)
+> Last audited against live code: 2026-06-18 (v0.15.3 — insert_line now inserts after line N)
+
+## v0.15.3 — insert_line convention fix (2026-06-18)
+
+**Bug fixed — `lib/mcp-registration.js` — `insert_line:N` was inserting BEFORE line N, not after:** Standard editor convention (Cline, Claude Code, VS Code) is that inserting at line N places new content after line N, pushing subsequent lines down. The insert handler was using `row = insert_line - 1` which inserted before the target line — off by one from what any LLM familiar with other tools would expect.
+
+Fix: changed `row` from `insert_line - 1` to `insert_line`. New content now appears after line N. Also updated the dryRun context slices and the dryRun message ("before line N" → "after line N"). Description updated to explicitly state "inserts AFTER line N, matching standard editor convention".
+
+---
+
+## v0.15.2 — str_replace failure messages: full scan diagnostics (2026-06-18)
+
+**Improvement — `lib/mcp-registration.js` — str_replace fail path now scans full file and reports all match locations (B22 partial):**
+
+Previously the `scanForOldStr` block only ran when a scope hint was active (`_hasScope`), only reported hits outside the active scope, silently discarded `hitsInsideScope`, and had a broken `=== null` check that never fired for "not found anywhere" (zero-hit results return `{ total: 0 }`, not `null`).
+
+Three new diagnostic messages now appear in every str_replace failure:
+
+- `❌ NOT FOUND ANYWHERE` — fires when `old_str` has zero hits anywhere in the file (`_fullScan.total === 0`). Names the active hint (`afterLine:40`, `afterString:"foo"`, `inFunction:"bar"`, etc.) so the LLM knows both the hint and the `old_str` need verifying. Always runs regardless of whether a scope hint was active.
+
+- `🔍 MATCH LOCATION FOUND inside scope at L<n>` — fires when the exact text of `old_str` is present inside the hint window but the commit failed due to whitespace mismatch or partial match. Previously these hits were found and discarded silently. Now the LLM gets the exact line number and function context so it can re-read that area and fix `old_str` directly.
+
+- `🚨 FOUND OUTSIDE SCOPE` — existing message, now also names the active hint in parentheses (e.g. `hint: inFunction:"test_smart_quotes"`).
+
+- No-scope-hint path added: when no hint is set and `old_str` fails, all hits across the file are listed with line numbers and function context so the LLM can identify which occurrence to target and add an appropriate scope hint.
+
+**Improvement — `lib/mcp-registration.js` — `afterLine`/`beforeLine` drift nudge fires on all failure types (B22):**
+
+Previously the drift nudge (suggesting `afterString` as a drift-immune alternative) was guarded by `wsIssues.length === 0 && partialMatchLines === 0` — it was suppressed when the failure involved a whitespace mismatch or partial match. The guard is removed. The nudge now fires whenever a positional line hint was active, regardless of failure type. Message also improved: `"use afterString:'...' instead of afterLine"` rather than the passive `"next time use afterString"`.
+
+**Improvement — `lib/tool-hints.js` — `successNudge` Case 1 wording sharpened:**
+
+On a successful `str_replace` that used only `afterLine` (no content-stable hint), the upgrade suggestion changed from `"Next time use afterString:… — it's content-stable"` to `"Switch to afterString:… — that anchor is content-stable and will find the right location even after edits."` Removes passive framing; reads as an immediate actionable correction.
+
+---
+
+## v0.15.1 — Hint failures now visible in fault log (2026-06-18)
+
+**Bug fixed — `lib/mcp-registration.js` — hint failures not logged to fault log (B18 + B19):** All hint early-return paths in `str_replace` (12 sites) and `insert` (8 sites) bumped stats counters but never called `logFailure`. The fault log only ever received `noMatch`/`whitespace`/`partialMatch` entries — content failures. All hint resolution failures (`afterString` not found, `inFunction` not found/ambiguous/needsTreeSitter, `betweenHint` start/end not found, `afterFunction`/`beforeFunction`/`afterSymbol`/`beforeSymbol` not found/ambiguous, `afterContent`/`beforeContent` not found/ambiguous, `functionEnd` not found) were completely invisible and uninspectable.
+
+Fix: added `logHintFailure()` module-level helper that wraps `logFailure` with a structured `reason` field: `"hintFault:<hintName>:<variant>"` (e.g. `hintFault:afterString:notFound`, `hintFault:inFunction:ambiguous`). Also records `hintValue` (the failing anchor string, truncated to 80 chars) and `oldStrPreview`. Wired at all 20 sites across both tools. The `sectionHint`/`preprocBlock` structural anchor path in `insert` already had `logFailure` — left untouched.
+
+The fault log `reason` field now takes one of two forms: content failures (`noMatch`, `whitespace`, `partialMatch`, `encoding`) or hint failures (`hintFault:<hintName>:<variant>`). Both the list view Reason column and the detail view in the Fault Log panel now show the distinction clearly.
+
+---
+
+## v0.15.0 — filePath routing, focus toggle, critical bump fix, lint cleanup (2026-06-18)
+
+**Bug fixed — `lib/tool-framework.js` — `bump` missing from deps destructure (critical):** `bump` was passed to `makeRegisterMcpTool()` in `mcp-registration.js` but was never destructured from `deps` in `tool-framework.js`. Every `ctx.fail()`, `ctx.commit()`, and `ctx.dryRunReturn()` call threw `ReferenceError: bump is not defined` at runtime, meaning stats were never bumped, `onCommit` never fired, and `lastEditedFilePath` was never set. All framework-routed tools were silently broken for stats tracking.
+
+**Bug fixed — `lib/pulsar-edit-mcp-server.js` — `loadMcpModules` only cache-busted `mcp-registration.js`:** `tool-framework.js` and `schema.js` were not invalidated on hot-reload, so changes to either file were silently ignored until a full Pulsar window reload. Now all three are busted via a `bust()` helper before re-requiring.
+
+**Bug fixed — `lib/buffer-helpers.js` — `readTextFromFile` `fs.readFileSync` fallback removed:** The fallback bypassed Pulsar's encoding detection and could return BOM-prefixed text (`\uFEFF`). `bufferForPath` is reliable and handles encoding correctly; if it throws, the error now surfaces visibly rather than falling back silently to a raw disk read.
+
+**Bug fixed — `lib/mcp-registration.js` — 14 `no-undef` lint warnings:** `replace-block`, `replace-function-body`, `delete-line-range`, and `delete-block` handler destructures were missing newer hint names added to `ANCHOR_SCHEMA`: `afterFunction`, `beforeFunction`, `afterSymbol`, `beforeSymbol`, `beforeString`, `afterLine`, `beforeLine`. All four updated to match full hint set.
+
+**Bug fixed — lint cleanup across project:** `chat-functions.js` — `eslint-disable-next-line` on intentional `while(true)` SSE loop. Both spec files — `eslint-env jasmine` + `global waitsForPromise` + unused imports prefixed `_`. `pulsar-edit-mcp-server.js` — unused `tools` var renamed `_tools`.
+
+**Feature — `lib/schema.js` — `filePath` added to `ANCHOR_SCHEMA`:** All edit tools that spread `ANCHOR_SCHEMA` now accept an optional `filePath` parameter. The framework resolves the buffer by path rather than using the active tab for writes.
+
+**Feature — `lib/tool-framework.js` — buffer-by-path acquisition:** Editor acquisition block rewritten with three priority paths: (1) `args.filePath` + file open in tab → use existing `TextEditor` buffer directly; (2) `args.filePath` + file not open → `atom.project.bufferForPath()` — no tab created, full undo and save support, no focus change ever; (3) no `filePath` + `requiresEditor` → active tab (read/nav/cursor tools only). Active tab is now never used for writes. Added `ctx.filePath` to ctx object.
+
+**Feature — focus edited file toggle:** Post-commit, if the edited file is open in a tab and `pulsar-edit-mcp-server.focusEditedFile` config is `true`, the tab is brought to front via `activateItem`. Closed files (edited via `bufferForPath`) never trigger a focus change regardless of toggle state. Config key added to `package.json` configSchema (boolean, default `true`, order 6). `Packages → MCP Server → Toggle Focus Edited File` command reads/writes the config and shows a notification. `onCommit` callback now fires for both open-tab and bufferForPath edits (previously only fired when `editor` was non-null).
+
+**Feature — `Packages → MCP Server → Show Last Edited File`:** After any successful commit, `lastEditedFilePath` is set via `onCommit`. The menu command calls `atom.workspace.open(filePath, { activateItem: true, searchAllPanes: true })` to bring that file to front on demand. Shows an info notification if no file has been edited yet this session.
+
+---
+
+## v0.14.4 — Bug fixes: stats, logging, disposable leaks, duplicate detection (2026-06-17)
+
+**Bug fixed — `lib/edit-stats.js` — silent catch in `appendSessionHistory` / `logFailure` (B1):** Both `catch (_) {}` blocks were empty, making disk-full or permission errors completely invisible. Both now log `console.warn('[edit-stats] X failed:', e.message)`.
+
+**Bug fixed — `lib/edit-stats.js` — redundant stats writes on shutdown (B2):** `process.on('exit')`, `SIGTERM`, and `SIGHUP` each duplicated the `syncToLifetime()` + `writeFileSync` inline, meaning up to 3 writes on graceful shutdown. Extracted into a single `_flushSync()` helper (with its own `console.warn` on error) called by all three handlers.
+
+**Bug fixed — `lib/tree-sitter-symbols.js` — silent catch in `getSymbolsFromEditor` (B8):** Top-level `try/catch` returned `[]` with no logging on any error, making grammar load failures and tree-sitter API breakage invisible. Now logs `console.warn('[tree-sitter-symbols] getSymbolsFromEditor failed:', ...)` before returning `[]`.
+
+**Bug fixed — `lib/tool-framework.js` — no duplicate tool name detection (B7):** `server.registerTool` with a duplicate name silently overwrote the previous registration. Added a `_registeredNames` Set inside `makeRegisterMcpTool`; any duplicate now logs `console.warn('[tool-framework] duplicate tool name "X" — previous registration will be overwritten')`.
+
+**Bug fixed — `lib/chat-panel.js` — `atom.commands.add` disposable not tracked (B5):** Return value of `atom.commands.add(this.element, {...})` was never stored or disposed, causing commands to persist after the panel was destroyed. Now stored as `this._commandsDisposable` and disposed in `destroy()`.
+
+**Bug fixed — `lib/chat-panel.js` — `atom.contextMenu.add` accumulates on every panel instantiation (B4):** Return value of `atom.contextMenu.add(...)` was never stored or disposed, causing context-menu entries to stack up on every open/close cycle. Now stored as `this._contextMenuDisposable` and disposed in `destroy()`.
+
+**Feature — `lib/edit-stats.js` + `mcp-registration.js` — fuzzy trigger detail in stats (#4):** Added `fuzzyTriggerReasons: { needsWhitespace, needsContent, needsComment, partial }` to `str_replace` stats. Each flag is bumped when the auto-retry diagnosis fires for that reason. Surfaced in `get-edit-stats` via `TOOL_REGISTRY compute()` (suppressed when all zero).
+
+**Feature — `lib/edit-stats.js` + `mcp-registration.js` — hint performance tracking + fault classification (#5a):** Added `hintsSucceeded` and `hintsFailed` objects (parallel to `hintsUsed`) to `str_replace` stats, bumped at commit and noMatch respectively for each active hint. Added `faultBuckets: { contentFaults, hintFaults }` — `contentFaults` when old_str is genuinely absent, `hintFaults` alongside every `outOfScope`/`afterNotFound`/`wrongOccurrence`. `get-edit-stats` now exposes `hintSuccessRate: { [hint]: { ok, fail, pct } }` for any hint that has been used.
+
+---
+
+## v0.14.3 — Auto-save on edit commit (2026-06-16)
+
+**Feature — `lib/tool-framework.js` — auto-save on `ctx.commit()` (#20):** Added `if (buffer) await buffer.save()` inside `ctx.commit()`, after `decorateEditedLines` and before the hit counter bump. Every tool that goes through the framework now saves the file automatically on a successful edit — no more manual `save-file` calls needed after edits. Framework version bumped to v1.1 in header comment.
+
+---
+
+## v0.14.2 — Bug fixes: stats, str_replace, grep_project, named capture groups (2026-06-16)
+
+**Bug fixed — `lib/edit-stats.js` — nearLine hint silently dropped:** `READ_LINES_HINT_KEYS` was missing the `nearLine` key, so `read-lines` handler's `bump('nearLine')` call hit no slot and was silently discarded. Fix: added `READ_LINES_HINT_KEYS = { ...FULL_HINT_KEYS, nearLine: 0 }` and wired it into the `read_lines` editStats block. (#22 side-effect fix)
+
+**Bug fixed — `lib/mcp-registration.js` — `afterLineOnly` hardcoded `false` in `successNudge` (#23):** Case 1 of `successNudge` (the "you used only a line-number hint" nudge) could never fire because `afterLineOnly` was always `false`. Fixed to compute from actual hint params.
+
+**Bug fixed — `lib/edit-stats.js` + `mcp-registration.js` — stale `get_linter_messages` counter (#24):** Dead counter block and `TOOL_REGISTRY` entry for the old `get_linter_messages` tool removed from both files.
+
+**Bug fixed — `lib/mcp-registration.js` — `_hasScope` TDZ crash on `tool-catalogue.js` hot-reload (#26):** `const _hasScope` was declared at ~L971 inside the `str_replace` handler body but used at ~L895 (the `noMatch` path). `const` puts the binding in TDZ for the entire enclosing block, so any `noMatch` execution crashed with "Cannot access '_hasScope' before initialization". This also caused `str_replace` to abort writes to `tool-catalogue.js` on every hot-reload. Fix: moved `_hasScope` declaration to top of handler (after `_radius`). `str_replace` on `tool-catalogue.js` now works correctly.
+
+**Bug fixed — `lib/string-utils.js` + `.mcp-ignore` + `lib/buffer-helpers.js` — `grep_project` broken on all globbed searches (#28):** Three fixes: (1) `globToRegex` built `^(pattern)$` — the `^` anchor means it only matches strings that start with the pattern, but `walkDir` returns absolute paths like `C:\Users\...\lib\foo.js`, so `^lib/*.js` never matched. Fix: removed `^`, now suffix-match `(pattern)$`. (2) `node_modules/` was absent from `.mcp-ignore`, causing unglobbed searches to walk 5000+ files. (3) `readTextFromFile` hardened with `fs.readFileSync` fallback if `bufferForPath` throws.
+
+**Feature — `lib/string-utils.js` + `mcp-registration.js` + `tool-catalogue.js` — named capture groups `$<name>` in replace tools (#10):** `applyReplacement` now accepts a 6th `namedGroups` argument. Regex extended to handle `$<name>` syntax. Four call sites in `mcp-registration.js` updated to extract and pass `namedGroups`. `replace-all` and `replace-across-files` descriptions in `tool-catalogue.js` updated to document `$<name>` syntax.
+
+**Docs — `lib/tool-catalogue.js` — string anchors for unstructured files (#15):** `str_replace` description updated to include a worked example of `afterString:'## Installation'` and `betweenHint:{start:'## Config',end:'## Usage'}` for markdown/config files. Matches the example already in the `insert` description.
+
+**Milestone — Tool Framework migration fully complete (all tools):** All deferred tools confirmed migrated by code inspection: `run-command` (L2496), `replace-across-files` (L2722), `get-repo-map` (L5060), and all 6 Ghidra tools (L5337–L5531). No bare `server.registerTool` call sites remain for tool handlers. The deferred tool migrations section has been removed from the refactor plan.
+
+ Added `SESSION_HISTORY_PATH` and `appendSessionHistory(entry)` to `edit-stats.js`. Called at both `get-edit-stats reset:true` sites (inline handler + `resetEditStats()`). `getEditStats()` reads the last 5 lines of `session-history.ndjson` and returns them as `recentSessions`. Schema: `{ts, session, edits, hits, faults, misses, hitRate, searches, searchHits}`.
+
+---
+
+## v0.14.1 — Fix grep-project 0-match race on large closed files (2026-06-16)
+
+**Bug fixed — `lib/buffer-helpers.js`:** `readFileOrBuffer()` used `atom.workspace.open(filePath, { activateItem: false })` as its fallback for closed files. On large files (~6600+ lines) this had a race condition where `getText()` returned empty or partial text because the buffer wasn't fully populated when the promise resolved. This caused `grep-project` (and all other read-only tools) to return 0 matches on `mcp-registration.js` and any other large closed file. Also opened a hidden Pulsar tab for every file scanned, polluting the workspace.
+
+**Fix:** Added `readTextFromFile()` — a new read-only helper that uses `await atom.project.bufferForPath(filePath)` for closed files. `bufferForPath()` resolves only when the buffer is fully loaded, uses Pulsar's encoding detection (no `\uFFFD` mojibake), and creates no pane item. All 14 read-only call sites in `mcp-registration.js` (`grep-file`, `grep-project`, `read-file`, `read-lines`, `get-region`, `search-symbol`, `file-line-count`, `get-repo-map`, `get-function-body`, `add-comment`, `list-project-functions`, and others) switched to `readTextFromFile()`. The write-path call in `replace-across-files` (commit step) retains `atom.workspace.open()` — it needs a real pane item for undo history and checkpoint support. `readFileOrBuffer()` kept in exports for write-path callers.
+
+---
 
 ## v0.14.0 — Tool Framework Phase 4f–4g complete: full migration (2026-06-12)
 

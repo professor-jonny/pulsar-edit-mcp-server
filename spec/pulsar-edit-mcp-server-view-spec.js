@@ -1,6 +1,7 @@
 'use babel';
+/* eslint-env jasmine */
 
-import PulsarMcpView from '../lib/pulsar-edit-mcp-server-view';
+import _PulsarMcpView from '../lib/pulsar-edit-mcp-server-view';
 
 describe('PulsarMcpView', () => {
   it('has one valid test', () => {

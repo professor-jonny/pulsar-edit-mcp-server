@@ -1,6 +1,8 @@
 'use babel';
+/* eslint-env jasmine */
+/* global waitsForPromise */
 
-import PulsarMcp from '../lib/pulsar-edit-mcp-server';
+import _PulsarMcp from '../lib/pulsar-edit-mcp-server';
 
 // Use the command `window:run-package-specs` (cmd-alt-ctrl-p) to run specs.
 //

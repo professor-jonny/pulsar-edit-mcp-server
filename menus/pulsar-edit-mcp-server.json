@@ -28,6 +28,14 @@
       {
         "label": "MCP: Show Fault Log...",
         "command": "pulsar-edit-mcp-server:show-fault-log"
+      },
+      {
+        "label": "MCP: Show Last Edited File",
+        "command": "pulsar-edit-mcp-server:show-last-edited-file"
+      },
+      {
+        "label": "MCP: Toggle Focus Edited File",
+        "command": "pulsar-edit-mcp-server:toggle-focus-edited-file"
       }
     ]
   },
@@ -69,6 +77,14 @@
             {
               "label": "Show Fault Log...",
               "command": "pulsar-edit-mcp-server:show-fault-log"
+            },
+            {
+              "label": "Show Last Edited File",
+              "command": "pulsar-edit-mcp-server:show-last-edited-file"
+            },
+            {
+              "label": "Toggle Focus Edited File",
+              "command": "pulsar-edit-mcp-server:toggle-focus-edited-file"
             }
           ]
         }
