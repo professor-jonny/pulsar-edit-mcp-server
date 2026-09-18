@@ -1,4 +1,4 @@
-.DS_Store
+﻿.DS_Store
 npm-debug.log
 node_modules
 package-lock.json
@@ -6,6 +6,4 @@ package-lock.json
 .mcp-broken/
 
 # Runtime data — machine-specific, not for version control
-failure-log.ndjson
-edit-stats.json
-session-notes.json
+session/

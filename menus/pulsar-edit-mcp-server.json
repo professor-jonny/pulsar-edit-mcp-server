@@ -22,6 +22,10 @@
         "command": "pulsar-edit-mcp-server:show-chat-panel"
       },
       {
+        "label": "MCP: Show Command Output Panel",
+        "command": "pulsar-edit-mcp-server:show-command-terminal-panel"
+      },
+      {
         "label": "MCP: Show Edit Stats...",
         "command": "pulsar-edit-mcp-server:show-edit-stats"
       },
@@ -69,6 +73,10 @@
             {
               "label": "Show Chat Panel",
               "command": "pulsar-edit-mcp-server:show-chat-panel"
+            },
+            {
+              "label": "Show Command Output Panel",
+              "command": "pulsar-edit-mcp-server:show-command-terminal-panel"
             },
             {
               "label": "Show Edit Stats...",

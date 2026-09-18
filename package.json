@@ -1,7 +1,7 @@
 {
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
-  "version": "0.14.0",
+  "version": "0.17.0",
   "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
   "keywords": [
     "mcp",
@@ -85,11 +85,18 @@
       "description": "Maximum tokens the built-in chat LLM can return per response. Raise if responses get cut off.",
       "order": 4
     },
+    "focusEditedFile": {
+      "type": "boolean",
+      "default": true,
+      "title": "Focus Edited File After Commit",
+      "description": "When enabled, switches to the edited file's tab after each successful LLM edit. Disable to keep your current tab focused while edits happen in the background. Only affects files already open in a tab — closed files are always edited silently without opening a tab.",
+      "order": 6
+    },
     "autoStart": {
       "type": "boolean",
       "default": false,
       "title": "Auto-Start MCP Server on Pulsar Launch",
-      "order": 5
+      "order": 7
     },
     "showChatPanel": {
       "type": "boolean",
