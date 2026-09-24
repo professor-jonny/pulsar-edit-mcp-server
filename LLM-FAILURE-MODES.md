@@ -2,13 +2,15 @@
 
 LLMs fail at code editing in predictable, classifiable ways. This document catalogues the failure modes we identified through real use, the solutions we built, and the reasoning behind each. Most solutions emerged from a feedback loop: the LLM queried its own `get-edit-stats` and `failure-log.ndjson` data mid-session, identified patterns, and proposed fixes — which were then implemented and validated against the same evidence base.
 
+> **Status note (2026-09-24):** Failure modes 1-16 and the pipeline/stats sections below were written around 2026-06 and predate the S1-S4 match-engine work. Some tool and parameter names have since been renamed or consolidated (`functionHint` is now `inFunction`; `afterHint` and `lineContentHint` are now `afterString`/`beforeString`; `lineNumberHint` is now `afterLine`/`beforeLine`; the separate delete and read tools were consolidated into `delete` and `read` -- see CHANGELOG 0.22.0). Check the live tool descriptions before relying on an old name. The lifetime stats quoted below are point-in-time figures from that period and have not been re-verified. Failure modes 17-21 were added on 2026-09-24 from failures observed while finishing S4e.
+
 ## How we know what's failing — the evidence base
 
 Two tools provide the data that drove every design decision here:
 
-**`get-edit-stats`** — per-tool, per-failure-reason counters tracked across sessions in `edit-stats.json`. Queryable by the LLM mid-session so it can see its own failure patterns and adjust strategy. No other tool (Claude Code, Cline, Cursor) exposes this — they have aggregate post-hoc scrapers at best; the running agent never sees its own performance data.
+**`get-edit-stats`** — per-tool, per-failure-reason counters tracked across sessions in `session/session-stats.json`. Queryable by the LLM mid-session so it can see its own failure patterns and adjust strategy. No other tool (Claude Code, Cline, Cursor) exposes this — they have aggregate post-hoc scrapers at best; the running agent never sees its own performance data.
 
-**`session-faults.ndjson`** — every `str_replace`/`insert`/`replace-block`/`replace-function-body` failure appended as a structured JSON record with `diffVsBuffer` (char-level diff of `old_str` vs actual buffer content), `bufferPreview`, `oldStrPreview`, and the full hint context. The log is grep-queryable and browsable via **Packages → MCP Server → Show Fault Log**. Every systematic failure class that appeared 3+ times with a recognisable pattern became a candidate for automatic rescue. The log converts anecdotal failure reports into measurable signals that justify engineering cost.
+**`session-faults.ndjson`** — every `str_replace`/`insert`/`replace-block`/`replace-function-body` failure appended as a structured JSON record with `bufferPreview` (raw buffer lines around the closest match), `oldStrPreview`, and `hintsSet` (the names of the hints that were passed; hint-resolution failures additionally record the hint value, see Failure Mode 16). The record also has a `diffVsBuffer` field, but on the two call sites checked (`str_replace`'s content-failure path and one `replace-function-body` path) it is always `null`, so do not expect a char-level diff in it (see Failure Mode 2). The log is grep-queryable and browsable via **Packages → MCP Server → Show Fault Log**. Every systematic failure class that appeared 3+ times with a recognisable pattern became a candidate for automatic rescue. The log converts anecdotal failure reports into measurable signals that justify engineering cost.
 
 ## Comparison: what other tools do
 
@@ -59,7 +61,7 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 *`regex:true`* — treats `old_str` as a JS regex. Use `.` to wildcard a single unknown character, `.*` for a span. The manual escape hatch for cases where the character type itself is unknown.
 
-*`diffVsBuffer`* — char-level diff appended to every noMatch failure response when `lineNumberHint` is set, showing exactly where the bytes diverged including invisible characters. Viewable in the fault log viewer.
+*Per-line search-versus-buffer diff and `bufferPreview`* — when a match fails, `str_replace` compares each line of `old_str` with buffer lines that are equal after trimming, and reports the pair (`searchText` against `bufferText`, each passed through `JSON.stringify`). That escapes tabs and control characters but does not escape a non-breaking or zero-width space, so those can still look identical in the output. What catches them is the classification: if a pair differs by non-ASCII characters once whitespace is stripped, the failure is classified as `encoding` rather than `whitespace`. The fault log also stores a `bufferPreview` (about five lines of raw buffer either side of the closest fuzzy match, as `L<n>: <content>`) and an `oldStrPreview` for side-by-side reading in the fault log viewer. **Correction:** earlier versions of this document described a char-level `diffVsBuffer` appended to every noMatch response. That is not what the code does. The `diffVsBuffer` field exists in the fault-log record and the viewer has a red style for it, but on the `str_replace` failure path it is initialised to `null` and never assigned (`mcp-registration.js` L980 and L1007; `lib/fail-diagnostics.js` L17 records it as dead data). Nothing in the response shows a character-level diff.
 
 *`[unicode]` flag in `get-repo-map`* — files containing non-ASCII characters are flagged at session start so the LLM knows to use `fuzzyContent` or `regex:true` before the first edit fails.
 
@@ -81,21 +83,21 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 ## Failure Mode 4 — Line number drift
 
-**What happens:** The LLM reads the file at turn N and gets line numbers. Edit 1 shifts everything below it. By edit 2 the line numbers in the LLM's head are wrong. Any line-number-based tool call — insert, delete-line-range, lineNumberHint — is affected. A `lineNumberHint` pointing 40+ lines off causes `diffVsBuffer` to compare completely unrelated content.
+**What happens:** The LLM reads the file at turn N and gets line numbers. Edit 1 shifts everything below it. By edit 2 the line numbers in the LLM's head are wrong. Any line-number-based tool call — `insert` with `afterLine`/`onLine`/`beforeLine`, `delete` with `startLine`/`endLine` (which its own description calls legacy and a last resort), or `afterLine`/`beforeLine` on `str_replace` — is affected. An `afterLine` or `beforeLine` pointing 40+ lines off makes the search window miss the target, and the failure is logged as `hintFault:afterLine:contentMiss` (or `hintFault:beforeLine:contentMiss`) with a `bufferPreview` of the wrong region.
 
-**How we know it's common:** Lifetime stats showed `lineNumberHint` used over 1300 times vs `afterHint` used 46 times and `functionHint` 42 times. The LLM reached for line numbers habitually because they're immediately available from grep output, even though content anchors would have been drift-immune. Multiple `failure-log` entries showed `lineHint pointing at wrong region` — the hint was off by 40+ lines due to prior inserts.
+**How we know it's common:** In the June 2026 lifetime stats, line-number hints (then `lineNumberHint`, now `afterLine`/`beforeLine`) were used over 1300 times against 46 for `afterHint` (now `afterString`) and 42 for `functionHint` (now `inFunction`). The LLM reached for line numbers habitually because they're immediately available from grep output, even though content anchors would have been drift-immune. Multiple `failure-log` entries showed `lineHint pointing at wrong region` — the hint was off by 40+ lines due to prior inserts. Those June counts are historical and are not re-verified: lifetime absolute counts are double-counted by a bug found 2026-09-24 (see the stats section), and the current mix has shifted, with `afterString` now the most-used hint in the live lifetime stats. Whether the shift came from the `successNudge` upgrade suggestion below has not been checked.
 
 **Solutions:**
 
-*Content-anchored hints* — `functionHint`, `afterHint`, `betweenHint`, `afterString`, `beforeString`, `lineContentHint`. These anchor by content rather than position; they don't drift when lines are inserted above the target.
+*Content-anchored hints* — `inFunction`, `afterFunction`/`beforeFunction`, `afterSymbol`/`beforeSymbol`, `betweenHint`, `afterString`, `beforeString`. These anchor by content rather than position; they don't drift when lines are inserted above the target. (The June 2026 version of this list named `functionHint`, `afterHint` and `lineContentHint`; per the status note at the top of this document, those parameters were later renamed or consolidated into the names above.)
 
-*`lineContentHint`* — accepts a unique string on the target line rather than a line number. Content-stable, drift-immune. Added as step 4b in the `str_replace` decision ladder.
+*`afterString`/`beforeString`* — accept a unique string on or near the target line rather than a line number. Content-stable, drift-immune. These are the current form of what this document used to call `lineContentHint` and `afterHint`.
 
-*`successNudge` lineHint upgrade suggestion* — when `str_replace` commits using only `lineNumberHint` on a file >= 100 lines, the success response appends a specific suggestion: `"Next time use afterHint:\"<content>\" instead — it's content-stable and won't drift."` The anchor string is extracted from the matched line at commit time — immediately usable, not generic advice. Trains the pattern within the session before the next failure.
+*`successNudge` upgrade suggestion* — `successNudge()` in `lib/tool-hints.js` has two triggers. Case 1: when a purely positional hint (`afterLine`, or the since-removed `insert_line`) was the only hint used on a file of 100 or more lines, the success response appends `afterLine is positional -- it drifts if lines are inserted or deleted above it`, followed by a concrete `Switch to afterString:"<anchor>"` suggestion. The anchor string is extracted from the matched line at commit time (first 80 characters), so it is immediately usable, not generic advice. Case 2: when no hint at all was used on a file of 300 or more lines, it appends a hint reminder. Two branches of Case 2 are worth knowing: a `str_replace` whose `old_str` looks like a whole function is steered to `replace-function-body`, and a file with no parseable symbol table (for example `.md` or `.txt`) is steered to `afterString`/`beforeString` with a note that `inFunction` will not work there. Trains the pattern within the session before the next failure.
 
-*`lineNumberHint` is a search-narrowing hint, not a position anchor* — it narrows the search window to ±25 rows around the specified line. If `old_str` is found in that window, it matches normally. It does not bypass content matching. The old `lineNumberHintFallback` positional overwrite was removed in v0.10.26 after producing 218 silent wrong-region overwrites in lifetime stats.
+*`afterLine`/`beforeLine` are search-narrowing hints, not position anchors* (this hint was called `lineNumberHint` until the parameter consolidation) — the window is directional, not symmetric. `afterLine:N` searches from line N down to N+25, and the target may be on line N itself; `beforeLine:N` searches from N-25 up to and including line N. The 25 is the default `HINT_RADIUS` (`lib/tree-sitter-symbols.js`), and `hintRadius` on `str_replace` overrides it. If `old_str` is found in the window, it matches normally. It does not bypass content matching. The old `lineNumberHintFallback` positional overwrite was removed in v0.10.26 after what the June 2026 lifetime stats recorded as 218 silent wrong-region overwrites. That is an absolute lifetime count, and lifetime absolute counts are unreliable because of the double-counting bug (see the stats section), so treat 218 as an upper bound rather than an exact figure.
 
-*`afterLine` vs `afterString` reliability — measured* — lifetime hint success rates confirm what theory predicts: `afterString` is 100% (56/56) because content is stable; `afterLine` is 75% (12/16) because line numbers drift after insertions above the target. The 4 `afterLine` failures were all `afterNotFound` — the hint pointed at a region that had shifted. Rule: use `afterLine` only when paired with a second hint (e.g. `inFunction` + `afterLine`). Never use `afterLine` as the sole hint on a file that is being actively edited across multiple turns.
+*Hint reliability — measured (re-measured 2026-09-24)* — the June 2026 figures were `afterString` 100% (56/56) and `afterLine` 75% (12/16), which matched the theory that content anchors are stable and line numbers drift. The live lifetime figures now read `afterString` 92% (282 ok, 26 failed), `afterLine` 88% (88 ok, 12 failed), `beforeString` 100%, `afterFunction` 100%, `betweenHint` 60%, and `inFunction` 44% (28 ok, 36 failed). These are ratios, so the lifetime double-counting bug (see the stats section) does not distort them, although it does inflate the raw counts shown here by about 2x. `afterString` and `afterLine` have the largest samples; `beforeString`, `afterFunction` and `betweenHint` have too few attempts to trust. The June and live figures also come from different mixes of work, so do not read the change as a trend. Three points follow. First, the gap between `afterString` and `afterLine` is now 4 points rather than 25, so the old rule "never use `afterLine` as the sole hint" is weaker than this document used to claim; `afterLine` is still drift-prone in principle and still worth pairing with a content anchor on a file under active edit. Second, the `str_replace` tool description calls `inFunction` the "safest choice for JS/C", and its measured success rate contradicts that. The cause has not been investigated: ambiguous names, arrow functions, non-JS files with no symbol table, and the hint being applied where the name is not a function are all plausible. Until it is understood, prefer `afterString`, and check the failure reason when `inFunction` fails. Third, the June `afterLine` failures were all `afterNotFound`, meaning the hint pointed at a region that had shifted; the current failure reasons have not been broken down.
 
 ---
 
@@ -107,11 +109,11 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **Solutions:**
 
-*Ambiguity guard* — before committing, `str_replace` counts all occurrences of `old_str` in the full file. If more than one match exists and no scope hint is set, the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing every matching line number. The LLM must add a hint before proceeding. The same guard applies to `replace-block`, `replace-function-body`, and `delete-block`. Passing `occurrence:N` where N > 1 disables the guard — deliberate targeting of multiples.
+*Ambiguity guard* — before committing, `str_replace` counts all occurrences of `old_str` in the full file. If more than one match exists and no scope hint is set, the edit is **blocked** with a `⚠️ AMBIGUOUS MATCH` response listing every matching line number. The LLM must add a hint before proceeding. The same guard applies to `replace-block`, `replace-function-body`, and the anchor modes of `delete` (its earlier separate `delete-block` tool was folded into `delete`; `delete` has an `anchorAmbiguous` failure counter). Passing `occurrence:N` where N > 1 disables the guard — deliberate targeting of multiples.
 
-*`occurrence:N`* — target the Nth match explicitly. When the pattern repeats and `functionHint` doesn't apply, `occurrence:3` replaces the 3rd occurrence only without widening `old_str`.
+*`occurrence:N`* — target the Nth match explicitly. When the pattern repeats and `inFunction` doesn't apply, `occurrence:3` replaces the 3rd occurrence only without widening `old_str`.
 
-*`functionHint`, `afterHint`, `betweenHint`* — scope the search to a named function body, after an anchor string, or between two anchor strings. Reduces the candidate pool to a region where the pattern is unique.
+*`inFunction`, `afterString`, `betweenHint`* — scope the search to a named function body, after an anchor string, or between two anchor strings. Reduces the candidate pool to a region where the pattern is unique. (Earlier versions of this document called the first two `functionHint` and `afterHint`.)
 
 **Why the guard belongs in the tool, not the prompt:** Prompt instructions like "always check for duplicates" are forgotten mid-conversation. Tool-enforced blocking fires unconditionally at the exact moment the mistake would have been made.
 
@@ -127,7 +129,7 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 *`replace-block`* — same brace-matching for non-function blocks. Triggered by any anchor string rather than a function name. Finds the next `{` after the anchor and matches to its closing `}`. Covers loops, conditionals, switch cases, struct blocks.
 
-*`delete-block`* — content-anchored delete given a start string and end string (or brace-match mode). No line numbers needed.
+*`delete` (anchor modes)* — content-anchored delete, replacing the earlier separate `delete-block` tool. `inFunction:'name'` deletes a whole named function including its signature; `startContent` plus `endContent` deletes from one anchor line to the other (`inclusive:false` keeps the anchor lines); `matchString` deletes one exact block. No line numbers needed. An earlier version of this document described a brace-match mode for `delete-block`; the current `delete` schema has no brace-match parameter, so for a brace-delimited block that is not a function, anchor it with `startContent` and `endContent` instead. (Whether `replace-block` accepts an empty replacement as a delete has not been checked.) The raw `startLine`/`endLine` mode remains, but the tool's own description marks it legacy and a last resort; pair it with `expectedContent`.
 
 ---
 
@@ -137,11 +139,11 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **Solutions:**
 
-*`read-lines` with content-anchored hints* — `functionHint`, `afterHint`, `betweenHint`, `centerLine`+`radius`. Brings only the relevant region into context without loading the full file.
+*`read` with content-anchored hints* — `inFunction`, `afterString`/`beforeString`, `betweenHint` (or the equivalent `startContent`+`endContent`), `sectionHint`, `preprocBlock`, or `nearLine`/`centerLine` with `radius` (default 10). Brings only the relevant region into context without loading the full file. This tool replaced the earlier `read-lines`; ambiguous anchors are refused with the candidate lines listed rather than guessed.
 
 *`get-repo-map`* — Aider-style compressed codebase index. Tree-sitter symbol extraction, PageRank-ranked by cross-file reference density, rendered within a token budget (default 1024 tokens). Called at session start to orient the LLM without consuming the context window. `mentionedFiles` boost re-centres the map around files currently being edited.
 
-*`get-region`* — returns lines between two anchor strings. Content-stable equivalent of `read-lines` — the LLM asks for "the HAL_Init block" without knowing its line number.
+*`read` with `betweenHint`* — returns lines between two anchor strings. This is the former `get-region`, merged with `read-lines` into the single `read` tool (`mcp-registration.js` L2172; `lib/edit-stats.js` L56 dates the consolidation 2026-09-18). Content-stable — the LLM asks for "the HAL_Init block" without knowing its line number.
 
 *`get-file-summary`* — structural summary: functions, includes, defines, TODOs. Cheap orientation before deciding what to read in full.
 
@@ -151,21 +153,21 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **What happens:** A hint is fully implemented in a tool's handler but not declared in `inputSchema`. The Zod validator silently drops it before the handler receives it. The LLM tries `delete-line-range functionHint:"someFunction"` and receives a result as if no hint were specified — no error, no warning, the hint simply didn't work.
 
-**How it was found:** Systematic audit of all edit tools comparing `inputSchema` declarations against handler parameter usage. `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineNumberHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented but none declared in schema. The tool appeared functional when tested manually; the bug was invisible without the audit.
+**How it was found:** Systematic audit of all edit tools comparing `inputSchema` declarations against handler parameter usage. `delete-line-range` had `dryRun`, `functionHint`, `afterHint`, `lineNumberHint`, `betweenHint`, `occurrence`, and `fuzzyWhitespace` fully implemented but none declared in schema. The tool appeared functional when tested manually; the bug was invisible without the audit. *Naming note:* this incident is described with the tool and parameter names in use in June 2026. `delete-line-range` has since been folded into `delete` (2026-09-17), `functionHint` is now `inFunction`, `afterHint` is now `afterString` (or `afterFunction` for a function), and `lineNumberHint` is now `afterLine`/`beforeLine`.
 
 **Solution:**
 
-*Schema audit matrix* — all edit tools verified that `hints`, `dryRun`, `fuzzyWhitespace`, `occurrence` are present in both `inputSchema` and the handler wherever intended. `ANCHOR_SCHEMA` is now a shared Zod spread applied to all tools that accept hints, so adding a new hint touches one place.
+*Schema audit matrix* — all edit tools verified that `hints`, `dryRun`, `fuzzyWhitespace`, `occurrence` are present in both `inputSchema` and the handler wherever intended. `ANCHOR_SCHEMA` is a shared Zod spread applied to the tools that accept hints, so adding a new hint touches one place. A second shared schema, `STRUCTURAL_ANCHOR_SCHEMA`, carries the section-banner and preprocessor hints (`sectionHint`, `preprocBlock`, `preprocSide`) and is spread into `insert` and `delete`; `str_replace` adds those three individually because the shared schema also carries `afterContent`/`beforeContent`, which are insert-only (comment at `mcp-registration.js` L250-255). So "one place" is not quite true any more: a new structural hint has to be added to `STRUCTURAL_ANCHOR_SCHEMA` and also declared separately for `str_replace`. (`read` also accepts `sectionHint`/`preprocBlock` but does not spread the shared schema; how it declares them was not traced.) This is the same drift that caused the original failure, so audit the schemas after adding a hint.
 
 ---
 
 ## Failure Mode 9 — Regex-based function matching failures
 
-**What happens:** Function detection and anchor resolution were originally built on regex. This caused `replace-function-body` notFound on arrow-function and `registerTool` patterns the regex never matched; `functionHint` scoping finding the wrong occurrence when a name appeared as both definition and call sites; `afterHint:"fn_name"` resolving to the first character occurrence of the string rather than the end of the function — causing insert-after-function to land inside the function body.
+**What happens:** Function detection and anchor resolution were originally built on regex. This caused `replace-function-body` notFound on arrow-function and `registerTool` patterns the regex never matched; function-name scoping (then `functionHint`, now `inFunction`) finding the wrong occurrence when a name appeared as both definition and call sites; and an "insert after this function" anchor (then `afterHint:"fn_name"`, now `afterFunction:"fn_name"`) resolving to the first character occurrence of the string rather than the end of the function — causing insert-after-function to land inside the function body.
 
 **Solution:**
 
-*Tree-sitter migration (v0.10.20–v0.10.21)* — `lib/tree-sitter-symbols.js` replaced all 9 regex-based function-matching sites. `afterHint:"fn_name"` now resolves to the **end** of that function (`sym.endRow`), not the first character. `betweenHint` spans function-to-function semantically. Ambiguous hints return an error with a list of matches rather than silently picking the first. All tools (`list-functions`, `read-lines`, `str_replace`, `replace-function-body`, `get-repo-map`, etc.) share the same backend — consistent results everywhere.
+*Tree-sitter migration (v0.10.20–v0.10.21)* — `lib/tree-sitter-symbols.js` replaced all 9 regex-based function-matching sites. `afterFunction:"fn_name"` now resolves to the **end** of that function (`sym.endRow`), not the first character. (In June 2026 this anchor was `afterHint:"fn_name"`.) `betweenHint` spans function-to-function semantically. Ambiguous hints return an error with a list of matches rather than silently picking the first. All tools (`list-functions`, `read`, `str_replace`, `replace-function-body`, `get-repo-map`, etc.) share the same backend — consistent results everywhere.
 
 ---
 
@@ -211,7 +213,9 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **Solution:**
 
-*`session-notes`* — persistent store the LLM writes to and reads from across sessions. At session start the LLM reads what it wrote last time and adjusts immediately — which hints worked on this codebase, which files hot-reload on save, what caused retries. Combined with `get-repo-map` at session start, the LLM arrives knowing both the code layout and accumulated codebase-specific lessons. Improves automatically with use; no user maintenance.
+*`session-notes`* — persistent store the LLM writes to and reads from across sessions. At session start the LLM reads what it wrote last time and adjusts immediately — which hints worked on this codebase, which files hot-reload on save, what caused retries. Combined with `get-repo-map` at session start, the LLM arrives knowing both the code layout and accumulated codebase-specific lessons.
+
+*It does need maintenance.* An earlier version of this document claimed it "improves automatically with use; no user maintenance". Experience since then says otherwise. The notes for one project grew to 45 records and roughly 190 KB, too large to read into context in one call, and they accumulated status claims that were later wrong ("Section 2 not wired", "that error is benign", "str_replace has no auto-save"), which later sessions inherited (see Failure Mode 21). Keeping the notes useful took deliberate curation: consolidating many notes into a few, writing a single "current state -- start here" note that supersedes older pointers, taking a dated backup before deleting anything, and deleting the highest index first because `delete` shifts the later indices down. Habits that keep it working: keep one current-state note and update it rather than adding parallel lists; record the evidence (file, line, command) for anything marked confirmed; read with `tail:N` rather than the whole store; and periodically review older notes for claims the code has since overtaken.
 
 ---
 
@@ -223,9 +227,9 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 **Solutions:**
 
-*`filePath` parameter on all edit tools* — since v0.14.x every edit tool (`str_replace`, `insert`, `delete-line-range`, `replace-function-body`, `replace-block`, `apply-patch`, `sed`, `replace-document`) accepts `filePath`. The framework opens the file in a background tab if it's not already open. The active tab is never used for writes. Passing `filePath` on every edit call eliminates the entire `contentFault` failure class — the edit can never land on the wrong buffer regardless of what the user or prior tool calls have made active.
+*`filePath` parameter on all edit tools* — since v0.14.x every edit tool (`str_replace`, `insert`, `delete`, `replace-function-body`, `replace-block`, `apply-patch`, `sed`, `replace-document`) accepts `filePath`; in the current schemas of `str_replace`, `insert`, `delete`, `sed` and `apply-patch` it is a required field. (`delete` replaced the earlier `delete-line-range`, which is what this list originally named.) The framework opens the file in a background tab if it's not already open. The active tab is never used for writes. Passing `filePath` on every edit call eliminates the entire `contentFault` failure class — the edit can never land on the wrong buffer regardless of what the user or prior tool calls have made active.
 
-*Rule: always pass `filePath` on edit calls to source files.* Read tools (get-region, read-lines, grep-file) can omit it when the intent is to operate on the active editor; edit tools should not rely on that assumption.
+*Rule: always pass `filePath` on edit calls to source files.* In the current tool schemas `read`, `grep-file`, `str_replace`, `insert` and `delete` all declare `filePath` as required, so the earlier advice that read tools (then `get-region`, `read-lines`, `grep-file`) could omit it to operate on the active editor no longer applies to them. Edit tools should still never rely on the active editor.
 
 *`show-last-edited-file` command* — **Packages → MCP Server → Show Last Edited File** reveals which file was actually committed to most recently. Useful when the active tab is uncertain.
 
@@ -247,7 +251,7 @@ Neither Claude Code nor Cline have `functionHint`, `lineNumberHint`, `dryRun`, w
 
 ## Failure Mode 16 — Hint failures invisible in the fault log
 
-**What happens:** When a hint resolution fails — `afterString` not found, `inFunction` not found or ambiguous, `betweenHint` start/end not found — the tool returns an error and bumps the relevant stats counter (`fails.afterNotFound`, `fails.outOfScope`). But the early-return path never called `logFailure`, so nothing was written to `session-faults.ndjson`. The fault log only ever received content failures (`noMatch`, `whitespace`, `partialMatch`). The 28+ `afterNotFound` hint faults visible in lifetime stats had zero corresponding fault log entries — the actual hint strings, file paths, and `old_str` context were completely uninspectable.
+**What happens:** When a hint resolution fails — `afterString` not found, `inFunction` not found or ambiguous, `betweenHint` start/end not found — the tool returns an error and bumps the relevant stats counter (`fails.afterNotFound`, `fails.outOfScope`). But the early-return path never called `logFailure`, so nothing was written to `session-faults.ndjson`. The fault log only ever received content failures (`noMatch`, `whitespace`, `partialMatch`). The 28+ `afterNotFound` hint faults visible in the June 2026 lifetime stats had zero corresponding fault log entries — the actual hint strings, file paths, and `old_str` context were completely uninspectable. (This is a historical lifetime count and has not been re-verified. Lifetime absolute counts are currently inflated by the double-counting bug described in the stats section, and when that bug began is not known, so treat "28" as approximate. The argument does not depend on the exact number: a non-zero counter with no log entries.)
 
 **How we know it's common:** Reviewing the fault log after a session with known `afterNotFound` faults showed only `noMatch` entries. Cross-referencing with `get-edit-stats` confirmed the count discrepancy: 28 `afterNotFound` faults in stats, 0 hint-related entries in the log. The gap was structural — the early-return pattern for all hint failures bypassed `logFailure`.
 
@@ -263,21 +267,125 @@ Both are queryable via `get-failure-log` with `reason` filter (e.g. `reason:"hin
 
 ---
 
+## Failure Mode 17 -- Exception between the buffer edit and the save (silent unsaved edit)
+
+**What happens:** A tool mutates the buffer, then later bookkeeping (decorate, nudge, lint, style, response building) throws before reaching the call that saves. The edit is in the buffer but not on disk. Every buffer-first read tool (`grep-file`, `read-file`, the dry-run preview) agrees with the buffer; an external read (PowerShell `Get-Content`) shows the stale disk. The error message is about something unrelated to the edit, and because the edit visibly landed, it is easy to label the error "benign" and carry on.
+
+**How it was found:** 2026-09-23/24. `str_replace` called `buffer.setTextInRange()` and then `successNudge({ symbols: allSymbols })`, but `allSymbols` was undeclared after a refactor (Failure Mode 18), so every committed `str_replace` threw a `ReferenceError` before `buildEditResponse()` -- the call that saves. A long README buffer-versus-disk loop followed. Two wrong diagnoses came first: "the tool has no auto-save" (it does; the save is inside `buildEditResponse`) and "the error is benign".
+
+**Solutions:**
+
+*Treat any error that follows a real content edit as a bug, not noise.* Confirm with `get-active-editor-info` (`modified:true` means unsaved), then find why the save was not reached rather than adding a second save.
+
+*Say which layer each read observes.* Buffer-first tools and raw disk reads can both be correct and still disagree. Call `save-all` before trusting an external read.
+
+*Hardening (recommended, not yet applied):* wrap the post-`setTextInRange` bookkeeping in `try/finally` so a late throw can never leave an unsaved buffer or hide the edit result.
+
+---
+
+## Failure Mode 18 -- A refactor drops a declaration; static checks and dry-runs cannot see it
+
+**What happens:** Swapping a hand-rolled block for a delegating call deletes a `const` that code further down still reads. `node --check` passes (an undeclared identifier is a runtime `ReferenceError`, not a syntax error), `get-diagnostics` reports 0/0/0, the extracted module's own unit tests pass (they never load the handler), and dry-run verification passes because dry-run returns before the commit path.
+
+**How it was found:** The S4e Section 2 rewire removed `const allSymbols = getSymbols(...)` along with the ~145-line scope block; the use at the success path went unnoticed until 2026-09-24. Section 2's live checks were ambiguity refusals and dry-run previews, none of which reached the commit. The same family appeared in the Section 3 rewire: `allOccurrenceLines = [...]` reassigned a `const` and crashed `str_replace` on every file.
+
+**Solutions:**
+
+*After any rewire, grep every identifier the deleted block declared for remaining uses.* This is a one-minute check that would have caught the bug.
+
+*Do not count a dry-run as verification of the commit path.* After each rewire run at least one real, non-dry-run commit through each path (scoped and unscoped) on a scratch fixture, then read the disk back.
+
+*Consider a handler-level smoke test* that drives a real commit against a fake buffer, so the standing suite exercises the code the module tests skip.
+
+---
+
+## Failure Mode 19 -- A defaulted parameter is treated as an explicit one (ambiguity guard silently disabled)
+
+**What happens:** A wrapper passes a caller-level default (`occurrence = 1`) straight through to an engine that treats any non-null value as an explicit disambiguation choice. The engine's ambiguity refusal never fires: two functions named `beta` resolve silently to the first, and the failure that eventually appears ("not found anywhere") is misleading. This is Failure Mode 5 (silent wrong-occurrence) reintroduced by the delegation layer.
+
+**How it was found:** Live test of Section 2 on 2026-09-23 against a scratch file with two functions named `beta`. The same bug class was then caught proactively in Section 3 before wiring (`_fragOccurrence`).
+
+**Solutions:**
+
+*Forward `occurrence` only when it is explicitly greater than 1* (`scopeOccurrence`, matching the existing `_hasScope` convention). "Null" and "1" are different values at an interface even when the caller treats them as the same.
+
+*Every delegation that passes a defaulted parameter needs a duplicate-name fixture test.* If the tool does not refuse the ambiguous case, the guard is off.
+
+---
+
+## Failure Mode 20 -- Dry-run and commit disagree about what matched
+
+**What happens:** The dry-run reports a match, but the real call fails with `commit-time verification failed ... No write was made`. The match stage normalises certain characters (apostrophes, smart quotes, dashes, double-encoded mojibake); the commit re-verifies the exact text in the live buffer and refuses. The safety guard works as designed (nothing is written), but the LLM has no signal that its `old_str` only matched after normalisation.
+
+**How it was found:** 2026-09-24, editing the refactor plan document, which already contains mojibake. An `old_str` containing an apostrophe matched in dry-run and failed at commit.
+
+**Solutions:**
+
+*Use `regex:true` and replace the ambiguous character with `.`.* Regex mode replaces the exact characters it matched, so the commit verifies cleanly. Alternatively anchor on an ASCII-only substring.
+
+*Treat a dry-run as necessary but not sufficient* for files known to contain non-ASCII text (`get-repo-map` marks these `[unicode]`).
+
+*Write new text in plain ASCII in files that already contain mojibake*, and edit them only through the Pulsar tools, never by re-saving through `Set-Content`/`Out-File`, which can compound the damage.
+
+*Candidate improvement (not built):* have the dry-run run the same exact-text verification as the commit, or tag its result when normalisation was needed, so the refusal is visible before the real call.
+
+---
+
+## Failure Mode 21 -- Diagnosis errors: conclusions from absence, one "ground truth", and stale status claims
+
+**What happens:** Three related reasoning failures cost most of the time in the S4e session.
+
+1. *Concluding "X is never called" from a search of one file.* A grep for `.save()` in `mcp-registration.js` found none in `str_replace`'s handler, and "no auto-save" was recorded as a confirmed bug. The save lives in `buildEditResponse()`, in another module. The correct diagnosis needed the full path to the terminal effect.
+2. *Picking one view as ground truth.* A raw disk read was trusted over the buffer, then two internally consistent pictures were reconciled for a long time instead of asking which layer each one observed.
+3. *Inheriting status claims from notes and docs.* Notes and plan text said "Section 2 not wired" and "that error is benign" while the code said otherwise, and later sessions built on them.
+
+**Solutions:**
+
+*Before concluding absence, trace the call path to the terminal effect,* including helpers the handler passes data into.
+
+*Verify status against the code, not against a note.* For "is it wired", grep the `require` and the call site. When recording something as confirmed, record the evidence (file, line, command) so it can be re-checked.
+
+*Correct wrong notes with a superseding "current state" note, then delete the wrong ones after taking a backup* (a dated copy of `session-notes.ndjson`). Delete the highest index first because indices shift, and fix any cross-references afterwards.
+
+---
+
 ## The auto-retry pipeline
 
-The most common `str_replace` failure causes now fire automatically before returning a failure, requiring no explicit flags. Each was opt-in originally; after lifetime stats showed them accounting for the vast majority of `noMatch` failures, automatic rescue became the safer choice.
+The most common `str_replace` failure causes fire automatically before a failure is returned, requiring no explicit flags. Each was opt-in originally; after lifetime stats showed them accounting for the vast majority of `noMatch` failures, automatic rescue became the safer choice.
+
+The rescue logic lives in `lib/recover.js` and is shared: `str_replace` delegates to it (since S4a), and `match-engine.js`'s `matchContent()` calls the same functions for the other tools. `recover.js` is pure -- it returns data and never bumps stats or builds messages; the calling tool does that. (The header comment at the top of `recover.js` still says `str_replace` runs its own inline copy. That comment is stale; the code at the call sites is authoritative.)
+
+This is NOT a strict sequential waterfall. The original design tried whitespace, then encoding, then comment-strip as separate passes. That misses a line with more than one kind of difference (for example an indent difference AND a smart quote), because neither a trim-only pass nor an encoding-only pass matches it alone. The current design diagnoses everything in one pass and does one combined retry.
+
+The diagram below is `str_replace`'s path. Other tools go through `match-engine.js`'s `matchContent()`, which is close but not identical: it runs exact first, then explicit `fuzzyWhitespace` and `fuzzyContent` stages only when the caller asked for them, and only then falls through to the same two `recover.js` rescues. It exposes an `autoRescue` option (default true) so a destructive caller can turn the automatic guessing off. `delete` (its `startContent`, `endContent` and `matchString` modes) and the start/end pair tool pass `autoRescue:false`, so they use strict matching and will not silently match a transformed needle. If a `delete` anchor fails with "not found" while the same text is visibly in the file, that is the reason: the anchor must match exactly, including any non-ASCII characters. As above, `regex:true` bypasses the whole waterfall in both paths. The project's stated direction is that where the engine and `str_replace` disagree, the engine changes to match `str_replace`, so treat this difference as temporary.
 
 ```
-P1  exact match           — indexOf in search window
-P2  fuzzyWhitespace       — trim-per-line (auto if not explicit)
-P3  fuzzyContent          — Unicode→ASCII normalisation (auto if not explicit)
-P4  autoStripComment      — strip trailing comment from old_str last line (auto)
-P4a autoPartialMatch      — when old_str is a prefix of a longer buffer line, commit the partial match (auto; tagged [autoPartialMatch])
-P5  regex:true            — treat old_str as /gm RegExp [explicit only]
-→ FAIL: diffVsBuffer char diff + Levenshtein similarity% + smartSuggestion + scanForOldStr scope check + session-faults.ndjson
+P1  exact match           -- indexOf in the resolved search window
+P2  profiledMatch         -- ONE combined rescue (skipped when regex:true):
+      classify every difference in one pass:
+        whitespace-only | unicode/encoding | trailing comment on the last line
+      build ONE transformed needle from whichever transforms are needed
+      retry ONCE against the window
+      tags: [autoFuzzyWhitespace] [autoFuzzyContent] [autoStripComment]
+      two hits in the window -> REFUSE as ambiguous (B41), never pick the first
+P3  partialMatchRescue    -- drift rescue (multi-line old_str only; skipped when regex:true):
+      window had no match at all -> search the WHOLE buffer for old_str's first 2 lines
+      found outside the resolved scope -> retry a whitespace-tolerant match from there
+      the same 2 lines occur more than once in the file -> REFUSE as ambiguous (B41)
+      tag: [autoPartialMatch]
+-> FAIL: diffVsBuffer char diff + Levenshtein similarity% + smartSuggestion
+         + scanForOldStr scope check + session-faults.ndjson
 ```
 
-Tags in the response (`[autoFuzzyWhitespace]`, `[autoFuzzyContent]`, `[autoStripComment]`) show which rescue path fired so the LLM can supply the flag explicitly next time.
+`regex:true` is not a stage in this pipeline. It is an explicit up-front matching mode that replaces the plain-text match, and it disables both rescues above. In regex mode `^`/`$` are line anchors (`gm` flags) and the commit replaces the exact characters that matched.
+
+Guards worth knowing about:
+
+- *Trailing-comment strip is conservative.* The stripped last line must keep at least 8 non-space characters and the whole needle at least 10 (`STRIP_MIN_LAST` / `STRIP_MIN_TOTAL`), so stripping a comment can never leave a trivial anchor behind. It only looks at the LAST line of `old_str`.
+- *A salvaged comment is not thrown away.* It is appended to the last line of `new_str` as `/* CHECK: <comment> */`, but only if that line has no comment of its own.
+- *`partialMatchRescue` is not a prefix match.* An earlier version of this document described it as "old_str is a prefix of a longer buffer line". That is not what the code does; it is a full-buffer drift rescue for the case where a prior insert or delete moved the target so the scope hint points at the wrong area.
+
+Tags in the response (`[autoFuzzyWhitespace]`, `[autoFuzzyContent]`, `[autoStripComment]`, `[autoPartialMatch]`) show which rescue fired, so the LLM can supply the flag explicitly next time.
 
 ---
 
@@ -299,7 +407,9 @@ Tags in the response (`[autoFuzzyWhitespace]`, `[autoFuzzyContent]`, `[autoStrip
 
 **Queryable mid-session by the LLM.** `get-edit-stats` returns the current session totals. The LLM can call this when failures cluster, see `"str_replace whitespace:8"`, and switch to `fuzzyWhitespace:true` for the rest of the session on that file — without waiting for session end.
 
-**Lifetime persistence.** `get-edit-stats({ reset: true })` flushes session counters into `edit-stats.json`, increments session count, and zeroes session counters. The lifetime block accumulates across all sessions and survives server restarts.
+**Lifetime persistence.** `get-edit-stats({ reset: true })` flushes session counters into `session/session-stats.json` (earlier versions of this document said `edit-stats.json`; that filename is wrong), increments session count, and zeroes session counters. The lifetime block accumulates across all sessions and survives server restarts. The path is `STATS_PATH` in `lib/edit-stats.js`.
+
+> **Known bug, fix pending (found 2026-09-24):** lifetime counters are currently double-counted (about 2x). `bump()` writes each event to both the session and lifetime counters, and `syncToLifetime()` then adds the session-minus-shadow delta to lifetime a second time on flush. The symptoms are that every lifetime count is even and `lifetimeSessionCount` is inflated. Session counters are correct. **Treat lifetime ratios and percentages as usable and lifetime absolute counts as unreliable** until the fix lands and the stats file is re-baselined. Once it is fixed, replace this note with the fix date and the re-baseline date. See session note [45].
 
 **Failure log viewer.** **Packages → MCP Server → Show Fault Log** opens an interactive modal: newest-first table, live filter by tool/reason/file, click any row for a detail view with `bufferPreview` (green), `diffVsBuffer` (red), `oldStrPreview` (amber) rendered as coloured code blocks. The Reason column now distinguishes two failure classes: content failures (`noMatch`, `whitespace`, `partialMatch`) and hint failures (`hintFault:afterString:notFound`, `hintFault:inFunction:ambiguous`, etc.) — previously all hint failures were invisible in the log; they only appeared as raw counters in `get-edit-stats`.
 
