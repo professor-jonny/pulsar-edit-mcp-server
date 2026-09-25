@@ -14,7 +14,7 @@ Two tools provide the data that drove every design decision here:
 
 ## Comparison: what other tools do
 
-*Verification note (2026-09-24):* this section was rewritten after reading the source of three open-source edit tools kept under `test/`: Cline (`_cline_src/cline-main`), Aider (`_aider_src/aider-main`) and opencode (`opencode-dev/opencode-dev`). Claude Code and Cursor are closed source and were not checked, so nothing below is claimed about them. The earlier version of this paragraph said Cline and Claude Code have no fuzzy matching and no failure diagnostics; that was wrong for the three tools below, and the table shows what the source actually contains. "Not seen" in the table means I looked for it in the edit-tool files and did not find it; it is weaker than "does not exist".
+Claude Code and Cursor are closed source so nothing below is claimed about them. The table below shows what the avaliable source actually contains. "Not seen" in the table means I looked for it in the edit-tool files and did not find it.
 
 | Capability | Cline | Aider | opencode |
 |---|---|---|---|
@@ -28,7 +28,7 @@ Two tools provide the data that drove every design decision here:
 | Location-scoping parameters | None: `replace_in_file` takes `path` and `diff` only | None | None: `filePath`, `oldString`, `newString`, `replaceAll` |
 | Per-failure-reason counters | Two types to remote telemetry, not shown to the model | One counter, incremented, never read | None |
 
-What this leaves as different in this project: content-anchored location hints (`inFunction`, `afterString` and the rest), a model-callable `dryRun`, and the running agent being able to read its own per-reason stats. None of those three appeared in any of the three sources. The rest of what this project does (fuzzy matching, a closest-match diagnostic, ambiguity refusal, post-edit diagnostics) exists in at least one of them. "Novel" is therefore not an accurate word for the whole system. Cline's failure mode is genuinely widely reported (its GitHub issues #1195, #2909, #3183 and #4384 describe token-eating retry loops), which is consistent with it being the weakest of the three at failure diagnostics. Every feature below exists because we measured a real failure class and fixed it.
+What this leaves as different in this project: content-anchored location hints (`inFunction`, `afterString` and the rest), a model-callable `dryRun`, and the running agent being able to read its own per-reason stats. None of those three appeared in any of the three sources. The rest of what this project does (fuzzy matching, a closest-match diagnostic, ambiguity refusal, post-edit diagnostics) exists in at least one of them. Cline's failure mode is genuinely widely reported (its GitHub issues #1195, #2909, #3183 and #4384 describe token-eating retry loops), which is consistent with it being the weakest of the three at failure diagnostics. Every feature below exists because we measured a real failure class and fixed it.
 
 Two ideas in the table are not confirmed to exist in this project and are worth checking: opencode's over-match guard and Aider's all-edits-dry-run-first transaction. Neither has been compared against this code.
 
