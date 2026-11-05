@@ -5,11 +5,12 @@
 // drift pre-check, then applyEditSpan on a fake buffer. No Pulsar, no atom -- run with
 // `node test/replace-fragment.pieces.test.js`.
 //
-// SCOPE / HONEST LIMIT: this does NOT call the replace handler (it needs Pulsar's
-// ctx, editor and stats). The handler-only glue -- refusal message text, bump() keys,
-// fault logging, struct/nudge suffixes, dry-run preview -- is NOT covered here; that
-// needs the fragment branch extracted into a pure module (like
-// lib/str-replace-fragment.js). Generic matcher/applyEditSpan cases already live in
+// SCOPE / HONEST LIMIT: this does NOT call a tool handler (it needs Pulsar's ctx,
+// editor and stats). The planner built from these pieces, planFragmentReplace in
+// lib/replace-fragment.js, has its own tests (replace-fragment.plan.test.js and
+// replace-fragment.multiline.test.js). The handler-only glue -- bump() keys, fault
+// logging, struct/nudge suffixes, dry-run preview -- is not covered here. Generic
+// matcher/applyEditSpan cases already live in
 // test/fragment-match.test.js; this file adds what that one lacks: unicode, CR,
 // BOM, scope windows across rows, special characters in new_str, and the drift guard.
 // All source text is ASCII; non-ASCII test data uses \u escapes.

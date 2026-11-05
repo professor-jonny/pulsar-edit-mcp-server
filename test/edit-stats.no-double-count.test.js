@@ -25,48 +25,48 @@ check('STATS_PATH is null (cannot write real stats file)', () => {
   assert.strictEqual(stats.STATS_PATH, null);
 });
 
-const s0 = stats.editStats.str_replace.hits;
-const l0 = stats.lifetimeStats.str_replace.hits;
+const s0 = stats.editStats.replace.hits;
+const l0 = stats.lifetimeStats.replace.hits;
 
 check('bump writes session and lifetime once each', () => {
-  for (let i = 0; i < 10; i++) stats.bump('str_replace', 'hits');
-  assert.strictEqual(stats.editStats.str_replace.hits - s0, 10);
-  assert.strictEqual(stats.lifetimeStats.str_replace.hits - l0, 10);
+  for (let i = 0; i < 10; i++) stats.bump('replace', 'hits');
+  assert.strictEqual(stats.editStats.replace.hits - s0, 10);
+  assert.strictEqual(stats.lifetimeStats.replace.hits - l0, 10);
 });
 
 check('syncToLifetime after bumps does NOT add a second copy', () => {
   stats.syncToLifetime();
-  assert.strictEqual(stats.lifetimeStats.str_replace.hits - l0, 10, 'lifetime doubled');
+  assert.strictEqual(stats.lifetimeStats.replace.hits - l0, 10, 'lifetime doubled');
 });
 
 check('repeated syncs (simulating the 5s timer) stay at N, not growing', () => {
   for (let i = 0; i < 20; i++) stats.syncToLifetime();
-  assert.strictEqual(stats.lifetimeStats.str_replace.hits - l0, 10);
+  assert.strictEqual(stats.lifetimeStats.replace.hits - l0, 10);
 });
 
 check('bumps interleaved with syncs stay 1:1 with session', () => {
-  for (let i = 0; i < 5; i++) { stats.bump('str_replace', 'hits'); stats.syncToLifetime(); }
-  assert.strictEqual(stats.editStats.str_replace.hits - s0, 15);
-  assert.strictEqual(stats.lifetimeStats.str_replace.hits - l0, 15);
+  for (let i = 0; i < 5; i++) { stats.bump('replace', 'hits'); stats.syncToLifetime(); }
+  assert.strictEqual(stats.editStats.replace.hits - s0, 15);
+  assert.strictEqual(stats.lifetimeStats.replace.hits - l0, 15);
 });
 
 check('nested counters (fails.*) are not doubled either', () => {
-  const subs = Object.keys(stats.editStats.str_replace.fails || {});
-  assert.ok(subs.length > 0, 'expected str_replace.fails sub-counters');
+  const subs = Object.keys(stats.editStats.replace.fails || {});
+  assert.ok(subs.length > 0, 'expected replace.fails sub-counters');
   const k   = subs[0];
-  const fs0 = stats.editStats.str_replace.fails[k];
-  const fl0 = stats.lifetimeStats.str_replace.fails[k];
-  for (let i = 0; i < 4; i++) stats.bump('str_replace', 'fails.' + k);
+  const fs0 = stats.editStats.replace.fails[k];
+  const fl0 = stats.lifetimeStats.replace.fails[k];
+  for (let i = 0; i < 4; i++) stats.bump('replace', 'fails.' + k);
   stats.syncToLifetime(); stats.syncToLifetime();
-  assert.strictEqual(stats.editStats.str_replace.fails[k] - fs0, 4);
-  assert.strictEqual(stats.lifetimeStats.str_replace.fails[k] - fl0, 4);
+  assert.strictEqual(stats.editStats.replace.fails[k] - fs0, 4);
+  assert.strictEqual(stats.lifetimeStats.replace.fails[k] - fl0, 4);
 });
 
 check('resetLastSynced is safe to call and does not change lifetime', () => {
-  const before = stats.lifetimeStats.str_replace.hits;
+  const before = stats.lifetimeStats.replace.hits;
   stats.resetLastSynced();
   stats.syncToLifetime();
-  assert.strictEqual(stats.lifetimeStats.str_replace.hits, before);
+  assert.strictEqual(stats.lifetimeStats.replace.hits, before);
 });
 
 check('style stats stay paired (bumpStyle session == lifetime delta)', () => {

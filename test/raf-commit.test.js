@@ -74,6 +74,26 @@ function mockEditor(opts) {
     try { await applyAndSave(m3.editor, 'X'); } catch (e) { threw = e; }
     check('3f a failure while setting the text is thrown to the caller (the handler records it as skipped)', threw && /set failed/.test(threw.message));
     check('3g and nothing is saved after a failed set', !m3.calls.includes('save'), JSON.stringify(m3.calls));
+
+    // R3j (2026-11-06): after the save the server's known-mtime record must be refreshed, or the next read reports
+    // the tool's own write as an external change (false STALE warning). applyAndSave takes an onSaved callback.
+    const m4 = mockEditor();
+    m4.editor.getBuffer().getPath = () => '/p/f.txt';
+    const r4 = await applyAndSave(m4.editor, 'T', (p) => m4.calls.push('saved:' + p));
+    check('3h onSaved is called once with the buffer path after a good save', JSON.stringify(m4.calls) === JSON.stringify(['set:T', 'save', 'saved:/p/f.txt']), JSON.stringify(m4.calls));
+    check('3i the result still says saved', r4 && r4.saved === true, JSON.stringify(r4));
+    const m5 = mockEditor({ saveRejects: true });
+    m5.editor.getBuffer().getPath = () => '/p/f.txt';
+    await applyAndSave(m5.editor, 'T', (p) => m5.calls.push('saved:' + p));
+    check('3j onSaved is NOT called when the save fails', !m5.calls.some(c => c.startsWith('saved:')), JSON.stringify(m5.calls));
+    const m6 = mockEditor({ setThrows: true });
+    m6.editor.getBuffer().getPath = () => '/p/f.txt';
+    try { await applyAndSave(m6.editor, 'T', (p) => m6.calls.push('saved:' + p)); } catch (_) { /* expected */ }
+    check('3k onSaved is NOT called when setting the text fails', !m6.calls.some(c => c.startsWith('saved:')), JSON.stringify(m6.calls));
+    const m7 = mockEditor();
+    m7.editor.getBuffer().getPath = () => '/p/f.txt';
+    const r7 = await applyAndSave(m7.editor, 'T', () => { throw new Error('stat failed'); });
+    check('3l a throwing onSaved does not turn a good save into a failure', r7 && r7.saved === true, JSON.stringify(r7));
   }
 
   // 4. source checks on the handler in lib/mcp-registration.js
@@ -94,6 +114,8 @@ function mockEditor(opts) {
   check('4k anchors other tests rely on are intact: the migrated comment and the removed-regex stub',
     src.includes('replace-across-files (migrated to Tool Framework)') && /regex:\s+REGEX_REMOVED_PARAM/.test(raf));
   check('4l the pending-preview guard is unchanged', raf.includes('No matching preview found to confirm'));
+  check('4m R3j: the commit loop passes recordKnownMtime to applyAndSave', /applyAndSave\([^)]*recordKnownMtime/.test(raf));
+  check('4n R3j: recordKnownMtime is imported from ./buffer-helpers', /^const \{[^}]*\brecordKnownMtime\b[^}]*\} = require\('\.\/buffer-helpers'\)/m.test(src));
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

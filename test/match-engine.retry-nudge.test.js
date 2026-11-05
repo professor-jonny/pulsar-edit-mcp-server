@@ -4,8 +4,8 @@
 // Plain node, no Pulsar, no buffer, no files written. Reads lib/mcp-registration.js as TEXT only.
 //
 // What is pinned:
-//   1. retryNudge() (lib/match-engine.js) knows replace: its field is old_str, like str_replace.
-//   2. The four tools that already had a nudge are unchanged, and a tool with no entry gets ''.
+//   1. retryNudge() (lib/match-engine.js) knows replace: its field is old_str.
+//   2. The other tools that already had a nudge are unchanged, and a tool with no entry gets ''.
 //   3. Every tool registered with features.retryOnFail has a retryNudge that names the same field
 //      (the comment above RETRY_FIELD_BY_TOOL says "keep in sync"; this makes it a check).
 //   4. replace's schema makes new_str optional (so a bare { filePath, old_str } retry passes MCP
@@ -35,8 +35,7 @@ t('retryNudge(replace) names old_str and replace', () => {
   assert.ok(n.includes('call replace again with just { filePath, old_str:'), n);
 });
 
-t('retryNudge: the four existing tools are unchanged', () => {
-  assert.ok(retryNudge('str_replace').includes('call str_replace again with just { filePath, old_str:'));
+t('retryNudge: the existing tools are unchanged', () => {
   assert.ok(retryNudge('delete').includes('call delete again with just { filePath, matchString:'));
   assert.ok(retryNudge('replace-block').includes('call replace-block again with just { filePath, anchor:'));
   assert.ok(retryNudge('replace-function-body').includes('call replace-function-body again with just { filePath, anchor:'));
@@ -63,9 +62,9 @@ t('every features.retryOnFail registration has a matching retryNudge field', () 
     }
   }
   const names = Object.keys(found);
-  // Only str_replace and replace register retryOnFail (delete, replace-block and
+  // Only replace registers retryOnFail (delete, replace-block and
   // replace-function-body have a nudge table entry but no registration: TODO I4).
-  assert.ok(names.length >= 2, 'expected at least str_replace and replace, found ' + names.join(', '));
+  assert.ok(names.length >= 1, 'expected at least replace, found ' + names.join(', '));
   names.forEach((tool) => {
     assert.ok(retryNudge(tool).includes('just { filePath, ' + found[tool] + ':'),
       tool + ' registers retryOnFail field ' + found[tool] + ' but retryNudge does not name it');

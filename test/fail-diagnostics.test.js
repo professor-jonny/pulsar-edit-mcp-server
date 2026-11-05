@@ -3,7 +3,7 @@
 // Run from the package root:   node test/fail-diagnostics.test.js
 // Pure-function test: no Pulsar, no buffer. Reads lib/mcp-registration.js as TEXT only.
 //
-// PJ DIRECTION: the module REPRODUCES str_replace exactly; quirks are FIXED LATER.
+// PJ DIRECTION: the module REPRODUCED the old edit tool's diagnosis exactly (that tool was removed 2026-11-13); quirks are FIXED LATER.
 // So this file has two kinds of test:
 //   RULE    -- behaviour that is correct and must stay.
 //   QUIRK   -- behaviour that is arguably WRONG but is deliberately preserved. Each is
@@ -217,48 +217,63 @@ t('closest area: with no usable word, falls back to rows 1-8', () => {
 });
 
 // -- rule 7: byte-identical to the source --------------------------------------
-// The module cannot be diffed against a live str_replace (the branch is inline in a
-// 7400-line closure), so pin its fixed strings against the SOURCE TEXT instead.
+// These messages used to be inline in mcp-registration.js and now live in fail-diagnostics.js (the
+// old inline branch is gone), so pin the fixed strings against the SOURCE TEXT of both files.
 // Comparison happens inside Node on code points, never through console output
 // (the Windows console renders U+2192 as U+001A).
-const SRC_PATH = path.join(__dirname, '..', 'lib', 'mcp-registration.js');
-const SRC = fs.readFileSync(SRC_PATH, 'utf8');
+const SRC_FILES = ['mcp-registration.js', 'fail-diagnostics.js'];
+const SRC = SRC_FILES.map(n => fs.readFileSync(path.join(__dirname, '..', 'lib', n), 'utf8')).join('\n');
 const stripEsc = s => s; // strings below are compared verbatim, escapes already resolved by JS
 const inSrc = (needle, label) => t('source-identical: ' + label, () => {
-  assert.ok(SRC.includes(needle), 'mcp-registration.js does not contain: ' + JSON.stringify(needle));
+  assert.ok(SRC.includes(needle), SRC_FILES.join(' + ') + ' does not contain: ' + JSON.stringify(needle));
 });
-inSrc('WHITESPACE MISMATCH on ${wsIssues.length} line(s) ' + EM + ' content matches but indentation differs:', 'whitespace header');
-inSrc('Fix indentation in old_str to match the buffer exactly, OR retry with fuzzyWhitespace:true to commit using buffer indentation.', 'whitespace fix hint');
 // 2026-11-03: insert's out-of-range message now says how to retry (it only showed the end of the file before).
 inSrc('Retry: pass a line number from 1 to ${lineCount + 1}, or use endOfFile:true (append) or startOfFile:true (prepend).', 'insert out-of-range retry guidance');
-// 2026-11-03: the PARTIAL MATCH reason is no longer a copy of the retired str_replace text: the module says why the
+// 2026-11-03: the PARTIAL MATCH reason is no longer a copy of the old inline text: the module says why the
 // line diverged (whitespace, content, or the region ending). So it is pinned in the MODULE source, not in mcp-registration.js.
 const MOD = fs.readFileSync(path.join(__dirname, '..', 'lib', 'fail-diagnostics.js'), 'utf8');
 t('module-source: partial match line', () => {
   assert.ok(MOD.includes('PARTIAL MATCH: first ${partialMatchLines} of ${lines.length} lines matched consecutively, then diverged. ${partialWhy('), 'fail-diagnostics.js lacks the partial match line');
 });
-inSrc('Content is close ' + EM + ' likely whitespace/indentation drift. Try fuzzyWhitespace:true or re-read that region.', 'similarity tier: close');
-inSrc('Moderate match ' + EM + ' old_str may be stale. Re-read the file with read and rebuild old_str from current buffer content.', 'similarity tier: moderate');
-inSrc('Low match ' + EM + ' old_str may be pointing at the wrong location entirely. Verify scope hints and re-read the target area.', 'similarity tier: low');
-inSrc('Closest area found (lines ${ctxStart + 1}' + EM + '${ctxEnd + 1}):', 'closest area header');
-inSrc('Similarity: ${simPct}% ' + EM + ' ${simHint}', 'similarity line');
 inSrc('content may have drifted after prior edits.', 'drift nudge');
 inSrc('Drift-immune alternative: use afterString:', 'drift nudge alternative');
 inSrc('Or re-run grep-file to confirm the current line number before retrying.', 'drift nudge tail');
-inSrc('NOT FOUND ANYWHERE ' + EM + ' old_str does not appear anywhere in the file.', 'not found anywhere');
-inSrc('Both the hint and the old_str content should be verified.', 'not found: verify');
-inSrc('\u2192 Re-read the target area with read and rebuild old_str from current buffer content.', 'not found: arrow line');
-inSrc('MATCH LOCATION FOUND inside scope at ${_locs} ' + EM + ' but exact text comparison failed (see whitespace/partial match detail above).', 'match location found');
-inSrc('FOUND OUTSIDE SCOPE ' + EM + ' old_str exists in the file but NOT inside ${String(scopeLabel).trim()', 'found outside scope');
 inSrc('Hit(s) outside scope: ${_locs}', 'outside scope hits');
 inSrc('Either widen the scope hint or change inFunction/betweenHint to target the right region.', 'outside scope: widen');
-inSrc('old_str found at ${_allLocs}', 'no-scope found-at');
 inSrc('add a scope hint (afterString/inFunction) to narrow the search.', 'no-scope found-at tail');
-// the glyphs themselves, by code point
-t('source-identical: emoji code points used by the module exist in the source', () => {
-  for (const cp of ['\uD83D\uDCA1', '\u274C', '\uD83D\uDD0D', '\uD83D\uDEA8', '\u2026']) {
-    assert.ok(SRC.includes(cp), 'source is missing U+' + cp.codePointAt(0).toString(16).toUpperCase());
-  }
+
+// -- rule 7b: the same wording and glyphs, pinned on the module's real OUTPUT (2026-11-14) ------
+// The source-text pins above only work for sentences that appear literally in a source file. The
+// module now builds most messages from constants (EM, S, Q1/Q2 and the glyph escapes), so literal
+// pins for those could never match again; these assert the same wording on what diagnose() returns.
+const outText = (r) => r.messages.concat(r.messagesPost || []).join('\n');
+t('wording: the whitespace block carries the fix hint and the fuzzyWhitespace retry advice', () => {
+  const all = outText(D.diagnose(F({ needle: 'const total = 1;', allLines: buf, scope: noScope, hints: {} })));
+  assert.ok(all.includes('WHITESPACE MISMATCH on 1 line(s) ' + EM + ' content matches but indentation differs:'), all);
+  assert.ok(all.includes('Fix indentation in old_str to match the buffer exactly, OR retry with fuzzyWhitespace:true to commit using buffer indentation.'), all);
+});
+t('wording: the similarity tier hints say what to do next', () => {
+  assert.strictEqual(D.similarityTier(60).hint,
+    'Moderate match ' + EM + ' old_str may be stale. Re-read the file with read and rebuild old_str from current buffer content.');
+  assert.strictEqual(D.similarityTier(30).hint,
+    'Low match ' + EM + ' old_str may be pointing at the wrong location entirely. Verify scope hints and re-read the target area.');
+  assert.ok(D.similarityTier(90, undefined, undefined, true).hint.startsWith('Content is close ' + EM + ' likely whitespace/indentation drift.'));
+});
+t('wording: NOT FOUND ANYWHERE tells the caller to verify the hint and re-read the area', () => {
+  const r = D.diagnose(F({ needle: 'zzz_absent_zzz();', allLines: buf, scope: noScope, hints: { afterString: 'function beta' } }));
+  const post = r.messagesPost.join('\n');
+  assert.ok(post.includes('NOT FOUND ANYWHERE ' + EM + ' old_str does not appear anywhere in the file.'), post);
+  assert.ok(post.includes('Both the hint and the old_str content should be verified.'), post);
+  assert.ok(post.includes('\u2192 Re-read the target area with read and rebuild old_str from current buffer content.'), post);
+});
+t('glyphs: the emoji the module prints are really in its output', () => {
+  const nm = D.diagnose(F({ needle: 'zzz_absent_zzz();', allLines: buf, scope: noScope, hints: {} }));
+  assert.ok(nm.messagesPost.join('\n').includes('\u274C'), 'NOT FOUND ANYWHERE lacks U+274C');
+  const drift = D.diagnose(F({ needle: 'const total = 1;', allLines: buf, scope: noScope, hints: { afterLine: 6 } }));
+  assert.ok(outText(drift).includes('\uD83D\uDCA1'), 'drift nudge lacks U+1F4A1');
+  const alpha = { hasScope: true, diagStart: 0, diagEnd: null, scanStart: 0, scanEnd: 3, label: ' (inFunction "alpha")' };
+  const outside = D.diagnose(F({ needle: 'const count = 2;', allLines: buf, scope: alpha, hints: { inFunction: 'alpha' } }));
+  assert.ok(outText(outside).includes('\uD83D\uDEA8'), 'FOUND OUTSIDE SCOPE lacks U+1F6A8');
 });
 
 // -- rule 8: purity -------------------------------------------------------------
@@ -288,7 +303,7 @@ t('bad input: an empty needle does not throw', () => {
 
 // -- rule 10: subject + fuzzyAdvice (added 2026-09-21 for delete Mode 4) -----------------
 // delete Mode 4 (startContent/endContent) reuses this diagnosis but must (a) name its OWN
-// input instead of str_replace's 'old_str', and (b) NOT recommend fuzzyWhitespace:true, which
+// input instead of the default 'old_str', and (b) NOT recommend fuzzyWhitespace:true, which
 // its matchContentEngine calls do not honour (they pass only {occurrence, autoRescue:false}).
 // Defaults must stay byte-identical -- rules 1-9 above are the proof.
 const allMsgs = (r) => r.messages.join('\n');
@@ -517,7 +532,7 @@ t('QUIRK 1: brute force -- no generated pair reaches hasEncodingIssue', () => {
   assert.strictEqual(reached, 0, reached + ' of ' + tried + ' pairs reached hasEncodingIssue -- QUIRK 1 hypothesis is FALSE');
 });
 
-// QUIRK 2: diagnosis window is whatever the CALLER passes. str_replace narrows it only for
+// QUIRK 2: diagnosis window is whatever the CALLER passes. The callers narrow it only for
 // inFunction/betweenHint. Pinned here as "the module trusts scope.diagStart/diagEnd".
 t('QUIRK 2: the module diagnoses exactly the window it is handed', () => {
   const narrow = { hasScope: true, diagStart: 0, diagEnd: 4, scanStart: 0, scanEnd: 3, label: '' };

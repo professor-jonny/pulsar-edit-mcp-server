@@ -40,7 +40,7 @@ function chkTrue(label, cond, detail) {
 let r = eng.buildFailResponse({ tool: 'insert', ctx: mk(), scope: sc(), match: miss, needle: 'zzz_absent();', isCodeFile: true });
 chk('A not-found-anywhere message',  r, 'NOT FOUND ANYWHERE', true);
 chk('A header names the tool',       r, '\u274C insert: content not found.', true);
-chk('A str_replace header dropped',  r, 'No match found for old_str', false);
+chk('A legacy-tool header dropped',  r, 'No match found for old_str', false);
 
 // B. found outside the real scope
 r = eng.buildFailResponse({
@@ -89,17 +89,18 @@ chkTrue('F no-hint call gives empty hints', !!(plain.hints && Object.keys(plain.
 const withStr = eng.resolveScope(Object.assign({}, base, { params: { afterString: 'function beta', occurrence: 1 } }));
 chkTrue('F afterString reaches scope.hints', !!(withStr.hints && withStr.hints.afterString === 'function beta'), 'hints=' + JSON.stringify(withStr.hints));
 
-// G. Window + scope alignment with str_replace. Both were wiring errors in the first cut,
-//    FOUND LIVE 2026-09-21 by running the same failing call through insert and str_replace.
-//    Control values below are the LIVE str_replace output for the same scoped miss.
+// G. Window + scope alignment with the legacy edit tool (removed 2026-11-13; its control values are kept as pins).
+//    Both were wiring errors in the first cut,
+//    FOUND LIVE 2026-09-21 by running the same failing call through insert and the legacy tool.
+//    Control values below are the LIVE legacy-tool output for the same scoped miss.
 const EMD = '\u2014';
 const inFn = sc({ searchStart: 0, searchEnd: 3, scopeLabel: ' within function "alpha"', _hasScope: true, via: 'inFunction', hints: { inFunction: 'alpha' } });
 r = eng.buildFailResponse({ tool: 'insert', ctx: mk(), match: miss, needle: 'const count = 2;', isCodeFile: true, scope: inFn });
 chk('G1 inFunction: indentation hit at L7 is NOT seen (outside the window)', r, 'WHITESPACE MISMATCH', false);
-chk('G1 inFunction: closest area equals the str_replace control',            r, 'Closest area found (lines 1' + EMD + '6)', true);
+chk('G1 inFunction: closest area equals the legacy-tool control',            r, 'Closest area found (lines 1' + EMD + '6)', true);
 // 2026-09-21: the exact text sits OUTSIDE the scope here, so the percentage is HIDDEN (PJ: "hide it in case") and the line says
-// so instead. The 61% parity with the live str_replace control no longer applies to this line: str_replace still prints it
-// until S4e. The closest-area parity above is unaffected.
+// so instead. The 61% parity with the live legacy-tool control no longer applies to this line: the legacy tool printed it
+// until it was removed. The closest-area parity above is unaffected.
 chk('G1 inFunction: the exact-outside-scope line replaces the percentage',   r, 'The text itself exists exactly (see FOUND OUTSIDE SCOPE below)', true);
 chk('G1 inFunction: no Similarity percentage is printed (hidden)',            r, 'Similarity:', false);
 chk('G1 inFunction: still reports FOUND OUTSIDE SCOPE',                      r, 'FOUND OUTSIDE SCOPE', true);
@@ -110,7 +111,7 @@ chk('G2 betweenHint narrows the window too',                                 r, 
 
 const aft = sc({ searchStart: 1, searchEnd: 8, scopeLabel: '', _hasScope: true, via: 'afterString', hints: { afterString: 'function alpha' } });
 r = eng.buildFailResponse({ tool: 'insert', ctx: mk(), match: miss, needle: 'const count = 2;', isCodeFile: true, scope: aft });
-chk('G3 afterString does NOT narrow (whole file, as str_replace)',           r, 'WHITESPACE MISMATCH on 1 line(s)', true);
+chk('G3 afterString does NOT narrow (whole file, as the legacy tool)',           r, 'WHITESPACE MISMATCH on 1 line(s)', true);
 
 const occ1 = sc({ _hasScope: true, via: 'none', hints: { occurrence: 1 } });
 r = eng.buildFailResponse({ tool: 'delete', ctx: mk(), match: miss, needle: 'const count = 2;', isCodeFile: true, scope: occ1 });
@@ -134,9 +135,9 @@ chkTrue('G6 wrapper carries occurrence onto scope.hints', !!(wr.hints && wr.hint
 const dctx = () => ({ consec: { count: 1 }, allLines: buf, text: buf.join('\n') });
 const joinAll = (d) => d.pre.concat(d.post).join('\n');
 
-// H1. default call: header-less pre (str_replace's own '? No match found' header is dropped), old_str wording.
+// H1. default call: header-less pre (the legacy tool's own '? No match found' header is dropped), old_str wording.
 let d = eng.diagnoseFailure({ tool: 'insert', ctx: dctx(), scope: sc(), needle: 'zzz_absent();' });
-chkTrue('H1 pre has no str_replace header', !d.pre.join('\n').includes('No match found for'));
+chkTrue('H1 pre has no legacy header', !d.pre.join('\n').includes('No match found for'));
 chkTrue('H1 default wording is old_str', joinAll(d).includes('old_str does not appear anywhere in the file.'));
 chkTrue('H1 returns the stat key that was bumped', d.statKey === 'noMatch', 'statKey=' + d.statKey);
 chkTrue('H1 returns hasScope=false for an unscoped call', d.hasScope === false);

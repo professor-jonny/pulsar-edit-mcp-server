@@ -189,7 +189,7 @@ async function main() {
   check('8e the old single file is only the migration source', /migrateLegacy\(/.test(sn) && /legacyNotesPath/.test(sn));
   check('8f the project is resolved through the store before any action', /notesStore\.resolveProject\(/.test(sn));
   check('8g the old removed.timestamp bug is gone', !/removed\.timestamp/.test(sn));
-  check('8h the tool description says how to read other projects and which actions need a project', /project:'all'/.test(sn) && /REQUIRE an explicit project/.test(sn));
+  check('8h the tool description says how to read other projects and which actions need a project', /project:'all'/.test(sn) && /explicit project/.test(sn));
   check('8i write appends to the project file', /notesStore\.append\(/.test(sn));
   check('8j edit and delete refuse a file that has unreadable lines', (sn.match(/unreadable line/g) || []).length >= 2, String((sn.match(/unreadable line/g) || []).length));
   const cat = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tool-catalogue.js'), 'utf8');

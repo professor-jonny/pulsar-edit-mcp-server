@@ -111,7 +111,8 @@ function editRow(lines, needle, newStr, opts) {
   const keep = editRow(['a\r', 'b\r', 'c\r'], 'b\r', 'B\r');
   check('W8 new_str with CR keeps the CR', keep.matched && JSON.stringify(keep.lines) === JSON.stringify(['a\r', 'B\r', 'c\r']), keep.lines);
   const drop = editRow(['a\r', 'b\r', 'c\r'], 'b\r', 'B');
-  check('W8 new_str without CR drops it (verbatim write, no preservation)', drop.matched && JSON.stringify(drop.lines) === JSON.stringify(['a\r', 'B', 'c\r']), drop.lines);
+  // 2026-11-19 (R2d fixed): a whole-line replace keeps the replaced row's own line ending even when new_str has no CR
+  check('W8 new_str without CR still keeps the row ending (R2d fixed)', drop.matched && JSON.stringify(drop.lines) === JSON.stringify(['a\r', 'B\r', 'c\r']), drop.lines);
 }
 
 // W9. Same for a BOM on the replaced row.

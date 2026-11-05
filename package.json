@@ -1,7 +1,7 @@
 {
   "name": "pulsar-edit-mcp-server",
   "main": "./lib/pulsar-edit-mcp-server",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Pulsar Editor MCP server — exposes editor tools to LLM clients via the Model Context Protocol",
   "keywords": [
     "mcp",
@@ -54,7 +54,8 @@
   },
   "scripts": {
     "postinstall": "patch-package || exit 0",
-    "test": "node test/run-all.js"
+    "test": "node test/run-all.js",
+    "check": "node test/check.js"
   },
   "configSchema": {
     "mcpServerPort": {
@@ -106,6 +107,13 @@
       "description": "Open the built-in chat panel when Pulsar launches. Disable to save screen space if you use an external client.",
       "order": 5
     },
+    "approvalAlert": {
+      "type": "boolean",
+      "default": true,
+      "title": "Sound and Taskbar Flash for Destructive-Command Approval",
+      "description": "When run-command needs your approval for a destructive command, play a short chime (the system beep if audio is blocked) and flash the taskbar button if Pulsar is not the focused window. Disable to stay silent.",
+      "order": 8
+    },
     "toolGroups": {
       "type": "object",
       "title": "Tool Groups (disable unused groups to save tokens)",
@@ -115,42 +123,42 @@
           "type": "boolean",
           "default": true,
           "title": "Edit Tools",
-          "description": "replace-text, replace-all, replace-document, replace-function-body, insert-text-at-line, insert-at-line, delete-line-range, get-selection"
+          "description": "replace, insert, delete, replace-all, sed, replace-function-body, apply-patch, write-file, read, get-structural-anchors, get-selection, insert-function-doc"
         },
         "search": {
           "type": "boolean",
           "default": true,
           "title": "Search Tools",
-          "description": "find-text, grep-file, grep-project, search-symbol, get-context-around"
+          "description": "grep-file, grep-project"
         },
         "navigation": {
           "type": "boolean",
           "default": true,
           "title": "Navigation Tools",
-          "description": "goto-line, open-file, list-open-files, get-surrounding-context, get-line-count, get-filename, get-full-path"
+          "description": "open-file, goto-line, list-open-files, get-file-info, close-file, goto-focus"
         },
         "fileOps": {
           "type": "boolean",
           "default": true,
           "title": "File Operation Tools",
-          "description": "read-file, read-lines, create-file, file-line-count, get-project-files, list-project-functions, get-includes-and-defines, replace-across-files"
+          "description": "get-project-files, list-project-functions, file-line-count, replace-across-files"
         },
         "diagnostics": {
           "type": "boolean",
           "default": true,
           "title": "Diagnostics Tools",
-          "description": "get-diagnostics (linter-bundle, live), get-compiler-diagnostics (gcc/clang/cl, requires save)"
+          "description": "get-diagnostics (linter-bundle, live), get-compiler-diagnostics (gcc/clang/cl, requires save), check-struct (brace / comment / #if balance)"
         },
         "safety": {
           "type": "boolean",
           "default": true,
           "title": "Safety Tools",
-          "description": "checkpoint, restore-checkpoint, list-checkpoints, diff-preview, undo, redo"
+          "description": "undo, redo"
         },
         "ghidra": {
           "type": "boolean",
-          "default": true,
-          "title": "Ghidra Tools",
+          "default": false,
+          "title": "Ghidra Tools (off by default)",
           "description": "list-functions, search-functions, get-function-body, get-xrefs, add-comment, get-function-list-with-comments"
         },
         "highlight": {
@@ -158,6 +166,30 @@
           "default": true,
           "title": "Highlight Tools",
           "description": "highlight-range"
+        },
+        "kernelChecks": {
+          "type": "boolean",
+          "default": false,
+          "title": "Kernel Style Checks (off by default)",
+          "description": "checkpatch, namingcheck, check-function-docs - Linux kernel C files only"
+        },
+        "checkpoints": {
+          "type": "boolean",
+          "default": false,
+          "title": "Checkpoint Tools (off by default)",
+          "description": "checkpoint, restore-checkpoint, list-checkpoints, diff-preview"
+        },
+        "fileAdmin": {
+          "type": "boolean",
+          "default": false,
+          "title": "File Admin Tools (off by default)",
+          "description": "move-file, copy-file, create-folder, rename-folder, get-includes-and-defines"
+        },
+        "debugging": {
+          "type": "boolean",
+          "default": false,
+          "title": "Debug Log (off by default)",
+          "description": "get-debug-log - the raw server log, only needed when the server itself misbehaves"
         }
       }
     }

@@ -1,11 +1,11 @@
 'use strict';
 // R4g (2026-10-31): tests for lib/search-engine.js, the shared pattern compiler and line scanner of
-// find-text, grep-file, grep-project and search-functions.
+// grep-file, grep-project and search-functions (find-text was removed 2026-11-18).
 //   Sections 1 and 2  pin down the behaviour that must NOT change (the literal path, scanLines options).
 //   Sections 3 to 9   specify the new behaviour: regex:true is a POSIX BRE like plain grep, extended:true
 //                     is an ERE like grep -E, both compiled by lib/posix-regex.js (the engine of sed).
 // Run from the package root:   node test/search-engine.test.js
-const { compilePattern, scanLines } = require('../lib/search-engine');
+const { compilePattern, scanLines, makeCaseProbe, caseHintForLines } = require('../lib/search-engine');
 
 let pass = 0, fail = 0;
 function check(label, cond, detail) {
@@ -20,7 +20,7 @@ function compileError(fn) { try { fn(); return null; } catch (e) { return e; } }
 
 // ---- 1. the literal path (regex:false) must not change -----------------------------------------------
 const L = ['alpha one', 'Beta two', 'gamma ONE', 'delta', 'one-one', ''];
-check('1a literal query is case-insensitive by default', scanLines(L, compilePattern({ query: 'one' })).matchCount === 3);
+check('1a literal query is case-sensitive by default, like grep (R4k)', scanLines(L, compilePattern({ query: 'one' })).matchCount === 2);
 check('1b caseSensitive:true is respected', scanLines(L, compilePattern({ query: 'one', caseSensitive: true })).matchCount === 2);
 check('1c regex characters in a literal query are literal', lineNumbers(['a.b', 'axb'], compilePattern({ query: 'a.b' })) === '1');
 check('1d a literal query of ( or [ compiles', compileError(() => compilePattern({ query: '(' })) === null && compileError(() => compilePattern({ query: '[a' })) === null);
@@ -62,7 +62,7 @@ check('5c alternation is leftmost-longest: a|ab on "ab" gives ab (JavaScript giv
 check('5d the JavaScript group (?:x) is not special: as in grep it is the group (:x) (the ? after the paren is dropped)', lineNumbers([':x', 'x'], ere('(?:x)')) === '1');
 
 // ---- 6. case --------------------------------------------------------------------------------------------
-check('6a regex:true keeps the existing default: case-insensitive', lineNumbers(['ABC'], bre('abc')) === '1');
+check('6a regex:true is case-sensitive by default, like grep (R4k)', lineNumbers(['ABC', 'abc'], bre('abc')) === '2' && lineNumbers(['ABC'], bre('abc')) === '');
 check('6b caseSensitive:true is respected by the POSIX path', lineNumbers(['ABC', 'abc'], bre('abc', { caseSensitive: true })) === '2');
 
 // ---- 7. onlyMatching on the POSIX path ------------------------------------------------------------------
@@ -97,13 +97,13 @@ const fs = require('fs');
 const path = require('path');
 const reg = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-registration.js'), 'utf8');
 const countOf = (s) => reg.split(s).length - 1;
-check('10a find-text, grep-file, grep-project and search-functions all pass extended to compilePattern', countOf('compilePattern({ query, regex, extended, caseSensitive') === 4, 'found ' + countOf('compilePattern({ query, regex, extended, caseSensitive'));
+check('10a grep-file, grep-project and search-functions all pass extended to compilePattern', countOf('compilePattern({ query, regex, extended, caseSensitive') === 3, 'found ' + countOf('compilePattern({ query, regex, extended, caseSensitive'));
 check('10b no call still compiles without extended', countOf('compilePattern({ query, regex, caseSensitive })') === 0);
 check('10c search-functions no longer builds its own JavaScript RegExp from the query', !/new RegExp\(query, flags\)/.test(reg));
-check('10d each of the four tools declares the extended parameter', (reg.match(/^\s+extended:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length >= 4);
-check('10e the four handlers destructure extended', (reg.match(/handler: async \(\{[^}]*\bregex = false, extended = false\b/g) || []).length === 4);
-check('10f find-text, grep-file and grep-project (not search-functions) pass wordRegexp and lineRegexp to compilePattern', countOf('wordRegexp, lineRegexp })') === 3, 'found ' + countOf('wordRegexp, lineRegexp })'));
-check('10g those three tools declare wordRegexp and lineRegexp and destructure them', (reg.match(/^\s+wordRegexp:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length === 3 && (reg.match(/^\s+lineRegexp:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length === 3 && (reg.match(/handler: async \(\{[^}]*wordRegexp = false, lineRegexp = false/g) || []).length === 3);
+check('10d each of the three tools declares the extended parameter', (reg.match(/^\s+extended:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length >= 3);
+check('10e the three handlers destructure extended', (reg.match(/handler: async \(\{[^}]*\bregex = false, extended = false\b/g) || []).length === 3);
+check('10f grep-file and grep-project (not search-functions) pass wordRegexp and lineRegexp to compilePattern', countOf('wordRegexp, lineRegexp })') === 2, 'found ' + countOf('wordRegexp, lineRegexp })'));
+check('10g those two tools declare wordRegexp and lineRegexp and destructure them', (reg.match(/^\s+wordRegexp:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length === 2 && (reg.match(/^\s+lineRegexp:\s+z\.boolean\(\)\.optional\(\),/gm) || []).length === 2 && (reg.match(/handler: async \(\{[^}]*wordRegexp = false, lineRegexp = false/g) || []).length === 2);
 
 // ---- 11. the no-match note about POSIX traps (regexHint) -------------------------------------------------
 const { regexHint, regexHintSuffix } = require('../lib/search-engine');
@@ -118,7 +118,7 @@ check('11g a lazy quantifier in an ERE raises the lazy note, but not in a BRE (w
 check('11h regex:false never raises a note, whatever the query', regexHint({ query: 'a|b+(c)\\d', regex: false }) === null);
 check('11i a plain BRE raises no note', hint('foo.*bar') === null && hint('^abc$') === null);
 check('11j the suffix form is empty without a note and starts with a space with one', regexHintSuffix({ query: 'a.b', regex: true }) === '' && /^ Note: /.test(regexHintSuffix({ query: 'a|b', regex: true })));
-check('11k the four no-match replies use the note', countOf('regexHint(') + countOf('regexHintSuffix(') >= 4, 'found ' + (countOf('regexHint(') + countOf('regexHintSuffix(')));
+check('11k the three no-match replies use the note', countOf('regexHint(') + countOf('regexHintSuffix(') >= 3, 'found ' + (countOf('regexHint(') + countOf('regexHintSuffix(')));
 
 // ---- 12. GNU grep is more lenient than sed (R4j, found with test/grep-oracle on 2026-10-31) --------------
 // Every expectation below is what real GNU grep 3.11 did on the same input (grep-diff.js). The sed engine
@@ -160,7 +160,7 @@ const W13 = ['foo', 'foobar', 'foo bar', 'xfoo', 'foo_bar', 'foo-bar', '(foo)', 
 const lit = (query, extra) => compilePattern(Object.assign({ query }, extra));
 check('13a literal wordRegexp: whole words only (grep -F -w)', lineNumbers(W13, lit('foo', { wordRegexp: true })) === '1,3,6,7,8,9');
 check('13b literal lineRegexp: the whole line only (grep -F -x)', lineNumbers(W13, lit('foo', { lineRegexp: true })) === '1');
-check('13c literal wordRegexp with the case folded (grep -F -wi)', lineNumbers(W13, lit('FOO', { wordRegexp: true })) === '1,3,6,7,8,9' && lineNumbers(W13, lit('FOO', { wordRegexp: true, caseSensitive: true })) === '');
+check('13c literal wordRegexp with the case folded (grep -F -wi); sensitive by default (R4k)', lineNumbers(W13, lit('FOO', { wordRegexp: true, caseSensitive: false })) === '1,3,6,7,8,9' && lineNumbers(W13, lit('FOO', { wordRegexp: true })) === '' && lineNumbers(W13, lit('FOO', { wordRegexp: true, caseSensitive: true })) === '');
 check('13d regex:true wordRegexp and lineRegexp behave the same for a plain word (BRE)', lineNumbers(W13, bre('foo', { wordRegexp: true })) === '1,3,6,7,8,9' && lineNumbers(W13, bre('foo', { lineRegexp: true })) === '1');
 check('13e ERE lineRegexp needs the whole line: foo|foobar gives the lines foo and foobar', lineNumbers(W13, ere('foo|foobar', { lineRegexp: true })) === '1,2' && lineNumbers(W13, bre('f.*r', { lineRegexp: true })) === '2,3,5,6');
 check('13f lineRegexp wins when both are given, as in grep', lineNumbers(W13, ere('foo', { wordRegexp: true, lineRegexp: true })) === '1');
@@ -171,6 +171,38 @@ check('13j a literal with regex characters is matched literally: a.b with -w', l
 check('13k + with -w: o+ finds only the whole words o and oo', lineNumbers(['foo', 'o', 'oo oo', 'ox'], ere('o+', { wordRegexp: true })) === '2,3');
 check('13l onlyMatching with -w lists each bounded match (grep -ow)', parts('foofoo foo a foo', lit('foo', { wordRegexp: true })).join() === 'foo,foo');
 check('13m the options do not change the default path: no wordRegexp or lineRegexp is still a plain RegExp for a literal', compilePattern({ query: 'foo' }) instanceof RegExp && compilePattern({ query: 'foo', wordRegexp: false, lineRegexp: false }) instanceof RegExp);
+
+// ---- 14. R4k step 1: the default is case-SENSITIVE, like real grep (caseSensitive:false is grep -i) -------
+// Real GNU grep 3.11: grep ABC on abc finds nothing, grep -i ABC finds it (checked 2026-10-31, see the R4g notes).
+const C14 = ['abc', 'ABC', 'Abc', 'xabcx', ''];
+check('14a literal: sensitive by default, caseSensitive:false folds, true is explicit sensitive', lineNumbers(C14, lit('abc')) === '1,4' && lineNumbers(C14, lit('abc', { caseSensitive: false })) === '1,2,3,4' && lineNumbers(C14, lit('abc', { caseSensitive: true })) === '1,4');
+check('14b regex BRE and ERE: sensitive by default, caseSensitive:false folds', lineNumbers(C14, bre('abc')) === '1,4' && lineNumbers(C14, ere('a.c')) === '1,4' && lineNumbers(C14, bre('abc', { caseSensitive: false })) === '1,2,3,4' && lineNumbers(C14, ere('A(B)C', { caseSensitive: false })) === '1,2,3,4');
+check('14c lineRegexp and wordRegexp follow the same default', lineNumbers(C14, lit('abc', { lineRegexp: true })) === '1' && lineNumbers(C14, lit('abc', { lineRegexp: true, caseSensitive: false })) === '1,2,3' && lineNumbers(C14, bre('abc', { wordRegexp: true })) === '1' && lineNumbers(C14, bre('abc', { wordRegexp: true, caseSensitive: false })) === '1,2,3');
+check('14d onlyMatching keeps the file text and honours the default', parts('xABC abc', lit('abc')).join() === 'abc' && parts('xABC abc', lit('abc', { caseSensitive: false })).join() === 'ABC,abc');
+check('14e the three handlers default caseSensitive to true (grep-file, grep-project, search-functions)', countOf('caseSensitive = true, maxMatches') === 2 && countOf('caseSensitive = true }, ctx') === 1 && countOf('caseSensitive = false, maxMatches') === 0, 'found ' + countOf('caseSensitive = true, maxMatches') + ' / ' + countOf('caseSensitive = true }, ctx') + ' / ' + countOf('caseSensitive = false, maxMatches'));
+check('14f the edit tools are NOT changed: replace-across-files and replace-all keep their own default', countOf('caseSensitive = false, glob') === 1 && countOf('caseSensitive = false, dryRun') === 1);
+check('14g no tool description still says the default is case-insensitive, and the search tools say it is sensitive', countOf('default is case-insensitive') === 0 && countOf('(default is case-sensitive)') >= 3, 'found ' + countOf('(default is case-sensitive)'));
+
+// ---- 15. R4k step 2: the zero-match case hint ------------------------------------------------------------
+// A case-sensitive search that finds nothing is re-run ignoring case; if that finds lines, the no-match note
+// says so and names caseSensitive:false. makeCaseProbe is a pure accumulator (feed it lines, then ask for the
+// hint); caseHintForLines is the one-call form for a single file. The four handlers append the note.
+const safe = (fn) => { try { return fn(); } catch (e) { return 'threw: ' + e.message; } };
+check('15a a miss on case gets a hint with the count, the first line and the retry', safe(() => { const h = caseHintForLines(C14, { query: 'aBc' }); return typeof h === 'string' && /\b4 lines\b/.test(h) && /line 1\b/.test(h) && /caseSensitive:false/.test(h); }) === true, String(safe(() => caseHintForLines(C14, { query: 'aBc' }))));
+check('15b one hit says "1 line" in the singular', safe(() => { const h = caseHintForLines(['Foo bar', 'baz'], { query: 'foo' }); return /\b1 line\b(?!s)/.test(h) && /line 1\b/.test(h); }) === true);
+check('15c no hint when nothing matches even ignoring case', safe(() => caseHintForLines(C14, { query: 'zzz' })) === null);
+check('15d no probe when the search already ignores case', safe(() => makeCaseProbe({ query: 'abc', caseSensitive: false })) === null);
+check('15e no probe with invertMatch (a zero count there means every line matched)', safe(() => makeCaseProbe({ query: 'abc', invertMatch: true })) === null);
+check('15f no probe when the query has no letters with a case (digits, punctuation, a class)', safe(() => makeCaseProbe({ query: '123' }) === null && makeCaseProbe({ query: '[0-9]', regex: true }) === null) === true);
+check('15g regex:true (BRE) and extended:true (ERE) are honoured in the second pass', safe(() => /\b1 line\b/.test(caseHintForLines(['xAbCx', 'none'], { query: 'a.c', regex: true })) && /\b1 line\b/.test(caseHintForLines(['xAbCx', 'none'], { query: 'a(b)c', regex: true, extended: true }))) === true);
+check('15h lineRegexp and wordRegexp are honoured in the second pass', safe(() => /\b1 line\b(?!s)/.test(caseHintForLines(['abc', 'xabc', 'abc d'], { query: 'ABC', lineRegexp: true })) && /\b2 lines\b/.test(caseHintForLines(['abc', 'xabc', 'abc d'], { query: 'ABC', wordRegexp: true }))) === true);
+check('15i a long line is shortened in the note', safe(() => { const h = caseHintForLines(['x'.repeat(200) + 'FOO'], { query: 'foo' }); return h.length < 400 && h.indexOf('...') > -1 && !/x{100}/.test(h); }) === true);
+check('15j fed file by file: total count, the first file and line, and the number of files', safe(() => { const p = makeCaseProbe({ query: 'foo' }); p.feed(['nothing'], 'a.c'); p.feed(['', 'FOO'], 'b.c'); p.feed(['Foo'], 'c.c'); const h = p.hint(); return p.count === 2 && /\b2 lines\b/.test(h) && /b\.c/.test(h) && /line 2\b/.test(h) && /2 files/.test(h); }) === true);
+check('15k unit "function name": counts names, shows the first one, no line wording', safe(() => { const p = makeCaseProbe({ query: 'crypto' }, { unit: 'function name' }); p.feed(['FUN_1', 'Crypto_init', 'my_CRYPTO']); const h = p.hint(); return /\b2 function names\b/.test(h) && /Crypto_init/.test(h) && !/\bline\b/.test(h) && /caseSensitive:false/.test(h); }) === true);
+check('15l a pattern that does not compile gives no probe and does not throw', safe(() => makeCaseProbe({ query: 'a\\(', regex: true })) === null);
+check('15m an empty probe has no hint', safe(() => { const p = makeCaseProbe({ query: 'foo' }); p.feed(['bar'], 'x'); return p.hint() === null && p.count === 0; }) === true);
+check('15n the zero-match path of grep-file calls caseHintForLines, grep-project and search-functions call makeCaseProbe', countOf('caseHintForLines(') === 1 && countOf('makeCaseProbe(') === 2, 'found ' + countOf('caseHintForLines(') + ' / ' + countOf('makeCaseProbe('));
+check('15o grep-project bounds the second pass with its own time budget (CASE_PROBE_MS)', countOf('CASE_PROBE_MS') >= 2, 'found ' + countOf('CASE_PROBE_MS'));
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

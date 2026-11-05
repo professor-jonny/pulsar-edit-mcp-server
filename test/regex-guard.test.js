@@ -14,13 +14,13 @@ function check(label, cond, detail) {
 }
 
 // ---- 1. which tools keep regex ------------------------------------------------------------------
-check('1a REGEX_KEEP is exactly the four search tools',
-  REGEX_KEEP.size === 4 && ['find-text', 'grep-file', 'grep-project', 'search-functions'].every(t => REGEX_KEEP.has(t)),
+check('1a REGEX_KEEP is exactly the three search tools',
+  REGEX_KEEP.size === 3 && ['grep-file', 'grep-project', 'search-functions'].every(t => REGEX_KEEP.has(t)),
   JSON.stringify([...REGEX_KEEP]));
 check('1b sed is NOT in REGEX_KEEP (it has no regex flag; its regex is the script)', !REGEX_KEEP.has('sed'));
 
 // ---- 2. refusal for every edit tool and for read --------------------------------------------------
-const EDIT_TOOLS = ['replace', 'str_replace', 'replace-all', 'replace-across-files', 'delete', 'insert',
+const EDIT_TOOLS = ['replace', 'replace-all', 'replace-across-files', 'delete', 'insert',
   'replace-block', 'replace-function-body', 'read'];
 for (const t of EDIT_TOOLS) {
   const r = regexRefusal(t, { regex: true, filePath: 'x.js' });
@@ -62,13 +62,13 @@ check('4c schema.js exports REGEX_REMOVED_PARAM and ANCHOR_SCHEMA uses it for re
 const stubLines = lines.filter(l => /^\s+regex:\s+REGEX_REMOVED_PARAM,/.test(l));
 check('4d replace, read, replace-across-files and replace-all declare the removed stub (4 lines)', stubLines.length === 4, 'found ' + stubLines.length);
 
-// every handler that still destructures regex must be one of the four search tools
+// every handler that still destructures regex must be one of the three search tools
 const regexHandlers = lines.filter(l => /handler:\s*async\s*\(\{[^}]*\bregex\b/.test(l));
-check('4e only the four search tools destructure regex in their handler', regexHandlers.length === 4, 'found ' + regexHandlers.length);
+check('4e only the three search tools destructure regex in their handler', regexHandlers.length === 3, 'found ' + regexHandlers.length);
 check('4f replace-across-files and replace-all no longer read a regex value',
   !/async handler\(\{ query, replacement, regex/.test(reg) && !/handler: async \(\{ query, replacement, regex/.test(reg));
 check('4g no edit path builds a pattern from user regex any more', !/regex \? query : escapeRegex\(query\)/.test(reg));
-check('4h the retired str_replace regexCommits counter is gone', !/'regexCommits'/.test(reg));
+check('4h the retired regexCommits counter is gone from the registration source', !/'regexCommits'/.test(reg));
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

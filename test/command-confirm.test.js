@@ -225,12 +225,19 @@ async function main() {
   const iGuard = reg.indexOf('confirmDestructive({');
   const iSpawn = reg.indexOf('_spawn(shell, spawnArgs');
   check('6d the approval is asked BEFORE the process is spawned', iGuard > -1 && iSpawn > -1 && iGuard < iSpawn, iGuard + ' / ' + iSpawn);
-  check('6e the destructive pattern is unchanged (rm rmdir del rd format Remove-Item ri rd /s)',
-    reg.includes('const DESTRUCTIVE_RE = /\\b(rm|rmdir|del|rd|format|Remove-Item|ri\\s|rd\\s.*\\/s)\\b/i;'));
+  check('6e the destructive pattern now lives in lib/command-confirm.js (pinned by test/command-guard.test.js) and mcp-registration imports it',
+    /const \{[^}]*\bDESTRUCTIVE_RE\b[^}]*\} = require\('\.\/command-confirm'\)/.test(reg) && !/const DESTRUCTIVE_RE\s*=/.test(reg));
   check('6f the tool description tells the model that confirm:true does not skip the prompt', /confirm:true does NOT skip/.test(reg));
   check('6g the chat-panel Run/Cancel row is gone: the question is asked only in the Command Output panel', !/chat-command-confirm/.test(reg) && !/chatAsk/.test(reg));
   const panelSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'command-terminal-panel.js'), 'utf8');
   check('6h the panel exposes askConfirm and answers every pending prompt when destroyed', /askConfirm\(/.test(panelSrc) && /_pendingConfirms/.test(panelSrc));
+  // 6i (2026-11-15): the panel must not be saved into Pulsar's layout. serialize() used to return
+  // { deserializer: 'CommandTerminalPanel' } with no deserializer registered, so Pulsar logged "No deserializer
+  // found" on every start. Like ChatPanel, the panel now has no serialize() at all.
+  const panelCode = panelSrc.replace(/\/\/.*$/gm, '');
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  check('6i the panel has no serialize(), names no deserializer, and package.json registers none: Pulsar never saves it into the layout',
+    typeof new CommandTerminalPanel().serialize !== 'function' && !/deserializer/i.test(panelCode) && !('deserializers' in pkgJson));
 
   // ---- 7. run-command output goes ONLY to the Command Output panel (2026-11-04) -----------------
   const rcStart = reg.indexOf("name:           'run-command'");

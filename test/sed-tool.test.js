@@ -182,7 +182,7 @@ check('8f handler destructures extended', /\bextended\s*=\s*false\b/.test(handle
 check('8g every hint is forwarded to resolveScope', hintNames.every(h => new RegExp('params: \\{[^}]*\\b' + h + '\\b').test(sedSrc)));
 check('8h scope rows are turned into 1-based sed line numbers', /from:\s*scope\.searchStart\s*\+\s*1,\s*to:\s*scope\.searchEnd\s*\+\s*1/.test(sedSrc));
 check('8i schema reuses the shared hint schema without regex / fuzzyContent', sedSrc.indexOf('ANCHOR_SCHEMA') !== -1 && /k !== 'regex' && k !== 'fuzzyContent'/.test(sedSrc));
-check('8j schema has the structural anchors and extended', ['banner:', 'ifdefBlock:', 'ifdefEdge:', 'extended:'].every(k => sedSrc.indexOf(k) !== -1));
+check('8j schema has the scope object (banner, ifdefBlock and ifdefEdge live in it since the 2026-11-19 rollout) and extended', ['scope: SCOPE_OBJECT_SCHEMA', 'extended:'].every(k => sedSrc.indexOf(k) !== -1));
 check('8k old occurrence number schema is gone', sedSrc.indexOf('occurrence:   z.number().int().optional()') === -1);
 check('8l handler runs the script through runSed with the resolved scope', /runSed\(\{ expression, extended, text: originalText, scope: scopeRange/.test(sedSrc));
 check('8m dry run and commit both use buildSedPreview output', sedSrc.indexOf('buildSedPreview(originalText, newText)') !== -1 && sedSrc.indexOf('buffer.setTextViaDiff(newText)') !== -1);
