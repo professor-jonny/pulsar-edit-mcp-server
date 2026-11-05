@@ -1,0 +1,8 @@
+Copy each file into the package folder at the SAME relative path:
+  C:\Users\j.brophy.CORKILLSYSTEMS\.pulsar\packages\pulsar-edit-mcp-server\
+    lib\sed-parse.js                       REPLACES the existing file (adds the strverscmp-style `v` version check)
+    test\sed-parse.test.js                 REPLACES the existing file (adds 5 `v` cases; 644 checks)
+    tools\sed-oracle\*                     NEW folder (9 files): the differential tools against a real GNU sed
+Then verify (PowerShell, from the package folder), every line of HASHES.txt must match:
+  Get-FileHash lib\sed-parse.js, test\sed-parse.test.js, tools\sed-oracle\* -Algorithm SHA256 | Format-Table Hash, Path
+and run:  node test\sed-parse.test.js   (expect 644 passed, 0 failed)   and   node test\run-all.js

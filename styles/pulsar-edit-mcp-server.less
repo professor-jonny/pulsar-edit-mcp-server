@@ -157,6 +157,9 @@
 .chat-command-stderr  { color: @text-color-warning; }
 .chat-command-info    { color: @text-color-info; opacity: 0.8; }
 .chat-command-exit    { color: @text-color-subtle; font-style: italic; }
+// First-open hint about the @// shortcuts: normal reading size (same as the message box), not the small
+// monospace used for command output. Must stay AFTER .chat-command-output so it overrides it.
+.chat-shortcut-tip    { font-family: inherit; font-size: @input-font-size; opacity: 1; padding: 4px 8px; white-space: normal; }
 
 // tool fault — shown when a tool handler throws
 .chat-command-fault {

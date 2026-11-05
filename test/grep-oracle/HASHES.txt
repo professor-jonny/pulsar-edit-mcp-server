@@ -1,0 +1,5 @@
+# SHA-256 of the files of this folder (recorded 2026-10-31). grep.exe is NOT part of the package: it is the prebuilt
+# GNU grep 3.11 for Windows x64 from https://github.com/mbuilov/grep-windows (file grep-3.11-x64.exe), downloaded by PJ.
+# The hash proves the file did not change since it was recorded; it does not prove who built it.
+836275f3e4125478a1a35a11818d9b0199c8593d8cb91aee8d3c51452770b739  test/grep-oracle/grep.exe  (1003008 bytes)
+ea919ed9f4c9b398326bfe5e28bcfc7e6bec2a97cf1b4b73a88dfe8c13b0b898  test/grep-oracle/grep-diff.js
